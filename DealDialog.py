@@ -1,7 +1,7 @@
 # This Python file uses the following encoding: utf-8
-from PySide2 import QtCore
-from PyQt5.QtWidgets import QApplication, QDialog
-from PyQt5 import QtCore, QtGui, QtWidgets, uic
+from PySide6.QtWidgets import QApplication, QDialog
+from PySide6 import QtCore, QtGui, QtWidgets
+from qt_loader import loadUi
 
 from enum import Enum
 from datetime import datetime
@@ -111,7 +111,7 @@ class RiskManager:
 class DealDialog(QDialog):
     def __init__(self):
         super().__init__()
-        uic.loadUi("deal.ui", self)
+        loadUi("deal.ui", self)
         self.buttonBox_2.accepted.connect(self.okPressed)
         self.buttonBox_2.rejected.connect(self.cancelPressed)
         self.ticketEdit.editingFinished.connect(self.tickerChanged)

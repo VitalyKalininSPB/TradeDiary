@@ -3,15 +3,11 @@ import sys
 import os
 
 
-from PySide2.QtWidgets import QApplication, QMainWindow
-from PySide2.QtCore import QFile
-from PySide2.QtUiTools import QUiLoader
-from PyQt5 import QtCore, QtGui, QtWidgets, uic
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtWidgets import QApplication
+from qt_loader import loadUi
 
 from EditDealDialog import EditDealDialog
-from PyQt5.QtGui import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
 
 
 from xml.dom.minidom import parse
@@ -43,15 +39,15 @@ class TableModel(QtCore.QAbstractTableModel):
         self._data = data
 
     def data(self, index, role):
-        if role == Qt.DisplayRole:
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
             return self._data[index.row()][index.column()]
-        if role == Qt.BackgroundRole:
+        if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if (self._data[index.row()][4] > self._data[index.row()][1]):
-                return QBrush(QColor(128,100,128))
+                return QtGui.QBrush(QtGui.QColor(128,100,128))
             elif (self._data[index.row()][4] < self._data[index.row()][1]):
-                return QBrush(QColor(100,128,128))
+                return QtGui.QBrush(QtGui.QColor(100,128,128))
             else:
-                return QBrush(Qt.white)
+                return QtGui.QBrush(QtCore.Qt.GlobalColor.white)
 
     def setData(self, data):
         self._data = data
@@ -67,8 +63,8 @@ class TableModel(QtCore.QAbstractTableModel):
         return len(self._data[0])
 
 
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+    def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        if role == QtCore.Qt.ItemDataRole.DisplayRole and orientation == QtCore.Qt.Orientation.Horizontal:
             return self.header_labels[section]
         return QtCore.QAbstractTableModel.headerData(self, section, orientation, role)
 
@@ -88,7 +84,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.show()
 
     def load_ui(self):
-        uic.loadUi("form.ui", self)
+        loadUi("form.ui", self)
+        self.resize(1600, 900)
 
     def read_data(self):
         DOMTree = xml.dom.minidom.parse("diary.xml")
