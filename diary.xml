@@ -1,10 +1,5 @@
 <?xml version="1.0" ?>
   <diary>
-    <balance value="232000"/>
-    <deal ticker="AAA" stockPrice="" stocksAmount="" openDate="" initPrice="" takeProfit="" stopLoss="" tradeSystem="" result="" closeDate="" whatsNext="" analysisNotes=""/>
-    <deal ticker="" stockPrice="" stocksAmount="" openDate="" initPrice="" takeProfit="" stopLoss="" tradeSystem="" result="" closeDate="" whatsNext="" analysisNotes=""/>
-    <deal ticker="CCC" stockPrice="" stocksAmount="" openDate="" initPrice="" takeProfit="" stopLoss="" tradeSystem="" result="" closeDate="" whatsNext="" analysisNotes=""/>
-    <deal ticker="DDD" stockPrice="" stocksAmount="1.0" openDate="" initPrice="" takeProfit="" stopLoss="" tradeSystem="" result="" closeDate="" whatsNext="" analysisNotes=""/>
-    <deal ticker="EEE" stockPrice="10.0" stocksAmount="1.0" openDate="12/02/2023 19:21" initPrice="10.0" takeProfit="12.0" stopLoss="9.0" tradeSystem="0" result="" closeDate="12/02/2023 19:21" whatsNext="" analysisNotes=""/>
-    <deal ticker="NASD-3.23" stockPrice="12400.0" stocksAmount="1.0" openDate="13/02/2023 20:44" initPrice="12400.0" takeProfit="12200.0" stopLoss="12480.0" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes=""/>
+    <balance value="-1.7224765116839365"/>
+    <deal ticker="GAZP" stockPrice="84.45" stocksAmount="100.0" openDate="21/08/2026 16:50" initPrice="84.45" takeProfit="0" stopLoss="0" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes="" currency="RUB"/>
   </diary>

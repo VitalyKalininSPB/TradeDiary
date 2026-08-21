@@ -18,6 +18,7 @@ from DealDialog import Deal
 from DealDialog import DirectionType
 
 import requests, zipfile, io
+import markets
 
 class TableModel(QtCore.QAbstractTableModel):
 
@@ -58,9 +59,7 @@ class TableModel(QtCore.QAbstractTableModel):
         return len(self._data)
 
     def columnCount(self, index):
-        # The following takes the first sub-list, and returns
-        # the length (only works if all rows are an equal length)
-        return len(self._data[0])
+        return len(self.header_labels)
 
 
     def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
@@ -81,6 +80,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.longButton.clicked.connect(self.longClicked)
         self.shortButton.clicked.connect(self.shortClicked)
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
+        self.balanceEdit.editingFinished.connect(self.balanceEdited)
+        self.recalcBalance()
         self.show()
 
     def load_ui(self):
@@ -92,10 +93,15 @@ class TradeDiary(QtWidgets.QMainWindow):
         collection = DOMTree.documentElement
 
         self.data = []
+        self.base_balance = 0.0
+        self.holdings_usd = 0.0
 
         balance = collection.getElementsByTagName("balance")
         for b in balance:
-            self.balanceEdit.setText(b.getAttribute('value'))
+            try:
+                self.base_balance = float(b.getAttribute('value') or 0)
+            except ValueError:
+                self.base_balance = 0.0
 
         deals = collection.getElementsByTagName("deal")
         for deal in deals:
@@ -115,8 +121,50 @@ class TradeDiary(QtWidgets.QMainWindow):
                     deal.getAttribute('result'), \
                     deal.getAttribute('closeDate'), \
                     deal.getAttribute('whatsNext'), \
-                    deal.getAttribute('analysisNotes')]
+                    deal.getAttribute('analysisNotes'), \
+                    deal.getAttribute('currency')]
             self.data.append(row)
+
+    def recalcBalance(self):
+        self.holdings_usd = 0.0
+        rate = markets.fetch_usd_rate()
+        for row in self.data:
+            currency = row[12]
+            if currency not in (markets.RUB, markets.USD):
+                continue
+            if row[9]:
+                continue
+            try:
+                amount = float(row[2] or 0)
+                price = float(row[1] or 0)
+            except ValueError:
+                continue
+            if amount <= 0 or price <= 0:
+                continue
+            if currency == markets.RUB:
+                if rate:
+                    self.holdings_usd += price * amount / rate
+            else:
+                self.holdings_usd += price * amount
+        self.updateBalanceDisplay()
+
+    def totalEquityUsd(self):
+        return self.base_balance + self.holdings_usd
+
+    def updateBalanceDisplay(self):
+        self.equityEdit.setText('{:.2f}'.format(self.totalEquityUsd()))
+        self.balanceEdit.setText('{:.2f}'.format(self.base_balance))
+
+    def balanceUsd(self):
+        text = self.balanceEdit.text().replace('$', '').replace(' ', '').strip()
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+    def balanceEdited(self):
+        self.base_balance = self.balanceUsd()
+        self.updateBalanceDisplay()
 
     def closeEvent(self,event):
         print("Close event")
@@ -125,7 +173,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         root = doc.documentElement
 
         balance = doc.createElement("balance")
-        balance.setAttribute("value", self.balanceEdit.text())
+        balance.setAttribute("value", str(self.base_balance))
         root.appendChild(balance)
 
         for row in self.data:
@@ -144,6 +192,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             deal.setAttribute("closeDate", row[9])
             deal.setAttribute("whatsNext", row[10])
             deal.setAttribute("analysisNotes", row[11])
+            deal.setAttribute("currency", row[12])
             root.appendChild(deal)
 
         #print(doc.toprettyxml())
@@ -155,34 +204,47 @@ class TradeDiary(QtWidgets.QMainWindow):
         event.accept()
 
     def longClicked(self):
-       print("Long clicked")
-       dlg = DealDialog()
-       dlg.setData(float(self.balanceEdit.text()))
-       dlg.setMode(DirectionType.BUY)
-       if dlg.exec():
-           print("Success!")
-           deal = dlg.makeDeal()
-           self.data.append(deal.toArray())
-           self.tradeTableView.model().layoutChanged.emit()
+        print("Long clicked")
+        dlg = DealDialog()
+        dlg.setData(self.balanceUsd())
+        dlg.setMode(DirectionType.BUY)
+        if dlg.exec():
+            print("Success!")
+            deal = dlg.makeDeal()
+            self.debitLong(deal)
+            self.data.append(deal.toArray())
+            self.tradeTableView.model().layoutChanged.emit()
+            self.recalcBalance()
+        else:
+            print("Cancel!")
 
-       else:
-           print("Cancel!")
+    def debitLong(self, deal):
+        cost_usd = None
+        if deal.currency == markets.RUB:
+            rate = markets.fetch_usd_rate()
+            if rate:
+                cost_usd = deal.stockPrice * deal.stocksAmount / rate
+        elif deal.currency == markets.USD:
+            cost_usd = deal.stockPrice * deal.stocksAmount
+        if cost_usd is not None:
+            self.base_balance -= cost_usd
 
     def shortClicked(self):
-      print("Short clicked")
-      dlg = DealDialog()
-      dlg.setData(float(self.balanceEdit.text()))
-      dlg.setMode(DirectionType.SELL)
-      if dlg.exec():
-          print("Success!")
-          deal = dlg.makeDeal()
-          self.data.append(deal.toArray())
-          self.tradeTableView.model().layoutChanged.emit()
+        print("Short clicked")
+        dlg = DealDialog()
+        dlg.setData(self.balanceUsd())
+        dlg.setMode(DirectionType.SELL)
+        if dlg.exec():
+            print("Success!")
+            deal = dlg.makeDeal()
+            self.data.append(deal.toArray())
+            self.tradeTableView.model().layoutChanged.emit()
+            self.recalcBalance()
 
     def editClicked(self, item):
         print("Edit clicked " + str(item.row()))
         dlg = EditDealDialog()
-        dlg.setData(self.data[item.row()], float(self.balanceEdit.text()))
+        dlg.setData(self.data[item.row()], self.balanceUsd())
         if dlg.exec():
             print("Success!")
             self.data[item.row()][1] = dlg.priceEdit.text()
@@ -190,6 +252,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.data[item.row()][10] = dlg.whatsNextEdit.toPlainText()
             self.data[item.row()][11] = dlg.notesEdit.toPlainText()
             self.tradeTableView.model().layoutChanged.emit()
+            self.recalcBalance()
 
     def updatePricesClicked(self):
         print("Update prices")

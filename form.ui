@@ -14,20 +14,72 @@
    <string>TradeDiary</string>
   </property>
   <widget class="QWidget" name="centralwidget">
+   <widget class="QLineEdit" name="equityEdit">
+    <property name="geometry">
+     <rect>
+      <x>78</x>
+      <y>8</y>
+      <width>90</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="equityCurrencyLabel">
+    <property name="geometry">
+     <rect>
+      <x>172</x>
+      <y>13</y>
+      <width>17</width>
+      <height>17</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>$</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="equityLabel">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>10</y>
+      <width>53</width>
+      <height>17</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Equity:</string>
+    </property>
+   </widget>
    <widget class="QLineEdit" name="balanceEdit">
     <property name="geometry">
      <rect>
-      <x>82</x>
+      <x>278</x>
       <y>8</y>
-      <width>113</width>
+      <width>90</width>
       <height>25</height>
      </rect>
+    </property>
+   </widget>
+   <widget class="QLabel" name="balanceCurrencyLabel">
+    <property name="geometry">
+     <rect>
+      <x>372</x>
+      <y>13</y>
+      <width>17</width>
+      <height>17</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>$</string>
     </property>
    </widget>
    <widget class="QLabel" name="label">
     <property name="geometry">
      <rect>
-      <x>20</x>
+      <x>205</x>
       <y>10</y>
       <width>67</width>
       <height>17</height>
@@ -56,7 +108,7 @@
    <widget class="QPushButton" name="longButton">
     <property name="geometry">
      <rect>
-      <x>270</x>
+      <x>410</x>
       <y>10</y>
       <width>89</width>
       <height>25</height>
@@ -69,7 +121,7 @@
    <widget class="QPushButton" name="shortButton">
     <property name="geometry">
      <rect>
-      <x>370</x>
+      <x>505</x>
       <y>10</y>
       <width>89</width>
       <height>25</height>

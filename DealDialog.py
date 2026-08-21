@@ -1,11 +1,13 @@
 # This Python file uses the following encoding: utf-8
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import QTimer
 from qt_loader import loadUi
 
 from enum import Enum
 from datetime import datetime
 from dataclasses import dataclass
+import markets
 
 class DirectionType(Enum):
     BUY = 1
@@ -24,22 +26,14 @@ class Deal:
     closeDate = ''
     whatsNext = ''
     analysisNotes = ''
+    currency = ''
     unit = 'pt'
 
     def toArray(self):
-        row = []
-        row.append(self.ticker)
-        row.append(self.stockPrice)
-        row.append(self.stocksAmount)
-        row.append(self.openDate)
-        row.append(self.initPrice)
-        row.append(self.takeProfit)
-        row.append(self.stopLoss)
-        row.append(self.tradeSystem)
-        row.append(self.result)
-        row.append(self.closeDate)
-        row.append(self.whatsNext)
-        row.append(self.analysisNotes)
+        row = [self.ticker, self.stockPrice, self.stocksAmount, self.openDate,
+               self.initPrice, self.takeProfit, self.stopLoss, self.tradeSystem,
+               self.result, self.closeDate, self.whatsNext, self.analysisNotes,
+               self.currency]
         return row
 
     @staticmethod
@@ -57,6 +51,7 @@ class Deal:
         deal.closeDate = array[9]
         deal.whatsNext = array[10]
         deal.analysisNotes = array[11]
+        deal.currency = array[12] if len(array) > 12 else ''
         return deal
 
 @dataclass
@@ -114,7 +109,11 @@ class DealDialog(QDialog):
         loadUi("deal.ui", self)
         self.buttonBox_2.accepted.connect(self.okPressed)
         self.buttonBox_2.rejected.connect(self.cancelPressed)
-        self.ticketEdit.editingFinished.connect(self.tickerChanged)
+        self._tickerDebounce = QTimer(self)
+        self._tickerDebounce.setSingleShot(True)
+        self._tickerDebounce.timeout.connect(self.tickerChanged)
+        self.ticketEdit.textEdited.connect(lambda: self._tickerDebounce.start(700))
+        self.ticketEdit.returnPressed.connect(self.tickerChanged)
         self.priceEdit.editingFinished.connect(self.priceChanged)
         self.stoplossEdit.editingFinished.connect(self.stopLossChanged)
         self.takeprofitEdit.editingFinished.connect(self.takeProfitChanged)
@@ -144,6 +143,7 @@ class DealDialog(QDialog):
         deal.stopLoss = float( self.stoplossEdit.text() ) if self.stoplossEdit.text() else 0
         deal.takeProfit = float( self.takeprofitEdit.text() ) if self.takeprofitEdit.text() else 0
         deal.openDate = self.openDateLabel.text()
+        deal.currency = getattr(self, '_currency', '') or ''
         return deal
 
     def okPressed(self):
@@ -157,42 +157,72 @@ class DealDialog(QDialog):
         else:
             self.infoLabel.setText(self.riskManager.warning)
             print('Risk is too much')
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                'Risk warning',
+                self.riskManager.warning + '. Do you want to continue?',
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if choice == QtWidgets.QMessageBox.StandardButton.Yes:
+                self.accept()
 
     def cancelPressed(self):
         print('Reject')
         self.reject()
 
+    def setCurrency(self, currency):
+        self._currency = currency
+        sign = markets.CURRENCY_SIGN.get(currency, 'pt')
+        if hasattr(self, 'priceUnitLabel'):
+            self.priceUnitLabel.setText(sign)
+        if hasattr(self, 'slUnitLabel'):
+            self.slUnitLabel.setText(sign)
+        if hasattr(self, 'tpUnitLabel'):
+            self.tpUnitLabel.setText(sign)
+
     def tickerChanged(self):
         print('TickerChanged')
-        # ???
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
+            self.setCurrency('')
             self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stockPrice)))
             return 'Future'
-        else:
+        ticker = self.ticketEdit.text().strip()
+        if not ticker:
             return 'Stock'
+        market, currency = markets.market_currency(ticker)
+        if market is not None:
+            self.setCurrency(currency)
+            if currency == markets.RUB:
+                price = markets.fetch_moex_price(ticker)
+            else:
+                price = markets.fetch_world_price(ticker)
+            if price is not None:
+                self.priceEdit.setText(str(price))
+        return 'Stock'
 
     def priceChanged(self):
         print('TickerChanged')
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
+            self.setCurrency('')
             self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stockPrice)) + ' RUB')
             return 'Future'
-        else:
-            return 'Stock'
+        return 'Stock'
 
     def stopLossChanged(self):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
+            self.setCurrency('')
             self.stopLossRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stopLoss)) + ' RUB')
             return 'Future'
-        else:
-            return 'Stock'
+        return 'Stock'
 
     def takeProfitChanged(self):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
+            self.setCurrency('')
             self.takeProfitRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.takeProfit)) + ' RUB')
             return 'Future'
-        else:
-            return 'Stock'
+        return 'Stock'
