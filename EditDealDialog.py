@@ -32,7 +32,13 @@ class EditDealDialog(QDialog):
         self.closeDateLabel.setText(self.deal.closeDate)
         self.takeprofitEdit.setText(str(self.deal.takeProfit))
         self.stoplossEdit.setText(str(self.deal.stopLoss))
-        #self.tradesystemList.setText(self.deal.tradeSystem)
+        try:
+            idx = int(self.deal.tradeSystem or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        self.tradesystemList.setCurrentIndex(idx)
+        if not self.deal.closeDate:
+            self.tradesystemList.setEnabled(True)
         self.whatsNextEdit.setText(self.deal.whatsNext)
         self.notesEdit.setText(self.deal.analysisNotes)
 

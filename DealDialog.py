@@ -13,6 +13,19 @@ class DirectionType(Enum):
     BUY = 1
     SELL = 2
 
+TRADE_SYSTEMS = ['Average MA', 'MACD']
+
+
+def trade_system_name(value):
+    """Human-readable name for a stored tradeSystem index."""
+    try:
+        idx = int(value or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if 0 <= idx < len(TRADE_SYSTEMS):
+        return TRADE_SYSTEMS[idx]
+    return TRADE_SYSTEMS[0]
+
 class Deal:
     ticker = ''
     stockPrice = 0
@@ -144,6 +157,7 @@ class DealDialog(QDialog):
         deal.takeProfit = float( self.takeprofitEdit.text() ) if self.takeprofitEdit.text() else 0
         deal.openDate = self.openDateLabel.text()
         deal.currency = getattr(self, '_currency', '') or ''
+        deal.tradeSystem = self.comboBox.currentIndex() if hasattr(self, 'comboBox') else 0
         return deal
 
     def okPressed(self):

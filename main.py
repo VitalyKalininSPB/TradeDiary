@@ -17,6 +17,7 @@ from DealDialog import DealDialog
 from DealDialog import Deal
 from DealDialog import DirectionType
 from DealDialog import FutureUtil
+from DealDialog import trade_system_name
 
 import requests, zipfile, io
 import markets
@@ -51,7 +52,8 @@ class TableModel(QtCore.QAbstractTableModel):
             'Result', \
             'Close At', \
             'What\'s next', \
-            'Notes']
+            'Notes', \
+            'Chart']
 
     def __init__(self, data):
         super(TableModel, self).__init__()
@@ -59,7 +61,12 @@ class TableModel(QtCore.QAbstractTableModel):
 
     def data(self, index, role):
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            return self._data[index.row()][index.column()]
+            col = index.column()
+            if col == 7:
+                return trade_system_name(self._data[index.row()][col])
+            if col == 12:
+                return ''
+            return self._data[index.row()][col]
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if (self._data[index.row()][4] > self._data[index.row()][1]):
                 return QtGui.QBrush(QtGui.QColor(42, 106, 64))
@@ -98,6 +105,11 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.model = TableModel(self.data)
         self.tradeTableView.setModel(self.model)
         self.tradeTableView.clicked.connect(self.editClicked)
+        self._chartButtons = []
+        self._rebuildChartButtons()
+        self.model.modelReset.connect(self._rebuildChartButtons)
+        self.tradeTableView.horizontalHeader().setSectionResizeMode(
+            12, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.longButton.clicked.connect(self.longClicked)
         self.shortButton.clicked.connect(self.shortClicked)
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
@@ -108,6 +120,32 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
+        self.tradeTableView.setColumnWidth(12, 70)
+
+    def _rebuildChartButtons(self):
+        for w in self._chartButtons:
+            w.setParent(None)
+            w.deleteLater()
+        self._chartButtons = []
+        if not hasattr(self, 'tradeTableView') or self.tradeTableView.model() is None:
+            return
+        rows = getattr(self, 'data', [])
+        for row in range(len(rows)):
+            btn = QtWidgets.QPushButton('Chart')
+            btn.setFixedSize(64, 24)
+            ticker = str(rows[row][0] or '')
+            btn.clicked.connect(lambda checked=False, r=row: self.chartClicked(r))
+            self.tradeTableView.setIndexWidget(self.model.index(row, 12), btn)
+            self._chartButtons.append(btn)
+
+    def chartClicked(self, row):
+        from ma_chart_dialog import MAChartDialog
+        if row >= len(self.data):
+            return
+        r = self.data[row]
+        dlg = MAChartDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
+        dlg.exec()
+        self.dealHistoryButton.clicked.connect(self.dealHistoryClicked)
         self.show()
 
     def openTickers(self):
@@ -462,6 +500,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         if dlg.exec():
             print("Success!")
             self.data[item.row()][1] = dlg.priceEdit.text()
+            self.data[item.row()][7] = dlg.tradesystemList.currentIndex()
             self.data[item.row()][9] = dlg.closeDateLabel.text()
             self.data[item.row()][10] = dlg.whatsNextEdit.toPlainText()
             self.data[item.row()][11] = dlg.notesEdit.toPlainText()
@@ -506,14 +545,61 @@ class TradeDiary(QtWidgets.QMainWindow):
             return 'SHORT' if tp < price else 'LONG'
         return 'LONG'
 
-    def recalcSlTpClicked(self):
-        """Recalculate recommended SL/TP for every open position.
+    def _groupOpenStocks(self):
+        """Group open (unclosed) stock positions by ticker.
 
-        Budget per position = risk% (scaled by portfolio correlation) of total
-        equity; TP is RR:1 of the resulting risk distance. Only stock positions
-        are processed (futures skipped for now, see TODO).
-        TODO(в GUI): продумать распределение СОВОКУПНОГО риска между позициями
-        и явное поле direction; фьючерсы (pointPrice) пока не поддерживаются.
+        Returns a dict ticker -> account with:
+          amount      : summed shares across rows
+          weightedPrice: price blended across rows (by amount)
+          currency     : currency of the ticker
+          rows         : list of open data rows belonging to the ticker
+          skipped      : reason string if the group could not be processed
+        Rows with invalid/non-positive data are collected together (their ticker
+        is skipped, reason preserved). Futures are skipped (TODO: pointPrice).
+        """
+        groups = {}
+        for row in self.data:
+            if row[9]:                      # закрытая сделка — пропускаем
+                continue
+            ticker = row[0].strip()
+            if FutureUtil.is_future(self._fakeDeal(ticker)):
+                groups.setdefault(ticker, {}).setdefault('skipped',
+                    'фьючерс, пока не поддерживается')
+                continue
+            try:
+                price = float(row[1] or 0)
+                amount = float(row[2] or 0)
+            except ValueError:
+                groups.setdefault(ticker, {}).setdefault('skipped',
+                    'нечисловые данные')
+                continue
+            if amount <= 0 or price <= 0:
+                groups.setdefault(ticker, {}).setdefault('skipped',
+                    'amount/price <= 0')
+                continue
+            g = groups.setdefault(ticker, {'amount': 0.0,
+                                           'weightedPrice': 0.0,
+                                           'currency': row[12].strip(),
+                                           'rows': []})
+            g['amount'] += amount
+            g['weightedPrice'] += price * amount
+            g['rows'].append(row)
+        # Взвешенная по объёму цена по каждому тикеру.
+        for g in groups.values():
+            if g.get('amount', 0) > 0:
+                g['weightedPrice'] /= g['amount']
+        return groups
+
+    def recalcSlTpClicked(self):
+        """Recalculate recommended SL/TP for every open position (by TICKER).
+
+        All open rows of the same ticker are aggregated into one position, so a
+        single 2%-style risk budget is applied per ticker rather than per row
+        (no duplicated risk for multiple entries of the same asset). TP is RR:1
+        of the resulting risk distance; the computed SL/TP is written back to
+        every open row of that ticker.
+        TODO(в GUI): продумать распределение СОВОКУПНОГО риска между разными
+        тикерами; явное поле direction; фьючерсы (pointPrice) пока не поддерживаются.
         """
         assets = self.openTickers()
         if not assets:
@@ -534,28 +620,16 @@ class TradeDiary(QtWidgets.QMainWindow):
         risk_pct = self._riskPercentForCorr(corr)
         risk_budget_usd = equity * risk_pct
 
-        changed = 0
+        groups = self._groupOpenStocks()
+        changed_tickers = []
         skipped = []
-        for row in self.data:
-            if row[9]:          # закрытая сделка — пропускаем
-                continue
-            ticker = row[0].strip()
-            try:
-                price = float(row[1] or 0)
-                amount = float(row[2] or 0)
-            except ValueError:
-                skipped.append(ticker + ' (нечисловые данные)')
-                continue
-            if amount <= 0 or price <= 0:
-                skipped.append(ticker + ' (amount/price <= 0)')
+        for ticker, g in groups.items():
+            if g.get('skipped'):
+                skipped.append(ticker + ' ({})'.format(g['skipped']))
                 continue
 
-            if FutureUtil.is_future(self._fakeDeal(ticker)):
-                skipped.append(ticker + ' (фьючерс, пока не поддерживается)')
-                continue
-
+            currency = g['currency'] or markets.USD
             # Локальный риск-бюджет в валюте сделки.
-            currency = row[12].strip()
             if currency == markets.RUB:
                 rate = markets.fetch_usd_rate()
                 if not rate:
@@ -563,10 +637,12 @@ class TradeDiary(QtWidgets.QMainWindow):
                     continue
                 budget_local = risk_budget_usd * rate
             else:
-                budget_local = risk_budget_usd  # валюты USD/иные считаем как есть
+                budget_local = risk_budget_usd  # валюту считаем как доллар
 
+            amount = g['amount']
+            price = g['weightedPrice']
             risk_per_stock = budget_local / amount
-            direction = self._dealDirection(row)
+            direction = self._dealDirection(g['rows'][0])
             if direction == 'LONG':
                 sl = price - risk_per_stock
                 tp = price + RR * risk_per_stock
@@ -574,25 +650,40 @@ class TradeDiary(QtWidgets.QMainWindow):
                 sl = price + risk_per_stock
                 tp = price - RR * risk_per_stock
 
-            # Сохраняем с разумной точностью для соответствующей валюты цены.
-            row[6] = self._priceStr(sl, currency)
-            row[5] = self._priceStr(tp, currency)
-            changed += 1
+            # Пишем одинаковые SL/TP во все открытые строки этого тикера.
+            for row in g['rows']:
+                row[6] = self._priceStr(sl)
+                row[5] = self._priceStr(tp)
+            changed_tickers.append(ticker)
 
         self.tradeTableView.model().layoutChanged.emit()
         self.recalcBalance()
 
-        if changed:
+        if changed_tickers:
             QtWidgets.QMessageBox.information(
                 self.window(), 'Recalc SL/TP',
-                'Recalculated SL/TP for {} position(s).\n'
+                'Recalculated SL/TP for {} ticker(s): {}.\n'
                 'Risk used: {:.2f}% of equity (portfolio corr {:.2f}).'
-                .format(changed, risk_pct * 100.0, corr)
+                .format(len(changed_tickers), ', '.join(sorted(changed_tickers)),
+                        risk_pct * 100.0, corr)
                 + (('\nSkipped: ' + ', '.join(skipped)) if skipped else ''))
         else:
             QtWidgets.QMessageBox.information(
                 self.window(), 'Recalc SL/TP',
                 'Nothing recalculated.' + ((' Skipped: ' + ', '.join(skipped)) if skipped else ''))
+
+    def dealHistoryClicked(self):
+        """Open the Deal History window (all deals).
+
+        Currently closes are empty, so fictional history is generated from the
+        open positions for a meaningful display.
+        TODO(в GUI): убрать генерацию, когда появится настоящая история.
+        """
+        from deal_history import DealHistoryDialog, generate_fake_history
+        open_rows = [r for r in self.data if not r[9]]
+        history = self.data + generate_fake_history(open_rows)
+        dlg = DealHistoryDialog(history, self)
+        dlg.exec()
 
     def _fakeDeal(self, ticker):
         """Minimal Deal-compatible object so FutureUtil can inspect the ticker."""
@@ -602,8 +693,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         return d
 
     @staticmethod
-    def _priceStr(value, currency):
-        """Format a price for storage (2 decimals for USD-ish, 2 for RUB too)."""
+    def _priceStr(value):
+        """Format a price for storage (2 decimals)."""
         return '{:.2f}'.format(value)
 
     def updatePricesClicked(self):
