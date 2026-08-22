@@ -14,7 +14,8 @@ from matplotlib.figure import Figure
 from matplotlib.dates import DateFormatter
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QComboBox)
+                               QLabel, QComboBox, QTableWidget,
+                               QTableWidgetItem, QHeaderView, QSpinBox)
 from PySide6.QtCore import Qt
 
 import price_history
@@ -54,6 +55,55 @@ def _crosses(short, long):
     return deaths, goldens
 
 
+def _sma(prices, window):
+    return _smooth(prices, prices, window)
+
+
+def _min_change(prices, i, horizon):
+    """Min price change (%) over `horizon` trading days after index i."""
+    hi = min(i + horizon, len(prices) - 1)
+    window = prices[i:hi + 1]
+    return window.min() / prices[i] - 1.0
+
+
+def analyze_death_crosses(dates, prices, horizons=(5, 10, 20, 50),
+                          thresholds=(0.02, 0.03, 0.05, 0.10),
+                          short=SHORT_MA, long=LONG_MA):
+    """Measure how often a death cross 'came true' for a ticker series.
+
+    A death cross is the close of the day where SHORT crosses below LONG.
+    It counts as fulfilled if price dropped by >= threshold within `horizon`
+    trading days. Crosses too close to the series end (no full horizon ahead)
+    are excluded from the hit rate.
+    Returns dict with death indices, a (horizon, threshold) grid, and details
+    for the primary (20d / -3%) variant.
+    """
+    ma_s = _sma(prices, short)
+    ma_l = _sma(prices, long)
+    deaths = _crosses(ma_s, ma_l)[0]
+    n = len(prices)
+    last = n - 1
+
+    grid = {}
+    for h in horizons:
+        for t in thresholds:
+            valid = [i for i in deaths if i + h <= last]
+            hits = sum(1 for i in valid if _min_change(prices, i, h) <= -t)
+            grid[(h, t)] = (hits, len(valid))
+
+    primary_h, primary_t = horizons[2], thresholds[1]  # 20d / 3%
+    details = []
+    for i in deaths:
+        if i + primary_h > last:
+            details.append((dates[i], prices[i], None, False, 'short'))
+            continue
+        chg = _min_change(prices, i, primary_h)
+        details.append((dates[i], prices[i], chg, chg <= -primary_t, 'ok'))
+
+    return {'death_indices': deaths, 'grid': grid, 'details': details,
+            'primary': (primary_h, primary_t)}
+
+
 class MAChartDialog(QDialog):
     def __init__(self, ticker, currency, open_date='', close_date='', parent=None):
         super().__init__(parent)
@@ -80,6 +130,10 @@ class MAChartDialog(QDialog):
         self.hintLabel = QLabel('')
         self.hintLabel.setStyleSheet('color: {};'.format(_TXT))
         bar.addWidget(self.hintLabel, 1)
+        self.analyzeBtn = QPushButton('Анализ крестов смерти')
+        self.analyzeBtn.setToolTip('Статистика: как часто крест смерти подтверждался падением цены')
+        self.analyzeBtn.clicked.connect(self._show_death_analysis)
+        bar.addWidget(self.analyzeBtn)
         layout.addLayout(bar)
 
         self.fig = Figure(figsize=(10, 6), dpi=100)
@@ -147,6 +201,18 @@ class MAChartDialog(QDialog):
 
         self.fig.tight_layout()
         self.canvas.draw()
+
+    def _show_death_analysis(self):
+        dates = [d for d, _ in self.series]
+        prices = np.array([p for _, p in self.series], dtype=float)
+        if len(prices) <= max(SHORT_MA, LONG_MA):
+            self.hintLabel.setText('Слишком мало данных для анализа')
+            return
+        res = analyze_death_crosses(dates, prices)
+        dlg = DeathCrossDialog(self.ticker, dates, prices, res, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._analysis_dlg = dlg
+        dlg.show()
 
     def _mark_hold(self, ax, x, dates, prices):
         """Shade the deal hold period and annotate duration."""
@@ -221,3 +287,132 @@ def _parse_date(s):
         except ValueError:
             continue
     return None
+
+
+_HORIZONS = (5, 10, 20, 50)
+_THRESHOLDS = (0.02, 0.03, 0.05, 0.10)
+
+
+class DeathCrossDialog(QDialog):
+    """Report: how often the death cross (SMA20<SMA50) came true for a ticker."""
+
+    def __init__(self, ticker, dates, prices, res, parent=None):
+        super().__init__(parent)
+        self.ticker = ticker or ''
+        self.dates = dates
+        self.prices = prices
+        self.res = res
+        self.setWindowTitle('Анализ крестов смерти — {}'.format(self.ticker))
+        self.resize(860, 640)
+        self.setStyleSheet(
+            'QDialog, QLabel, QSpinBox, QTableWidget {{ color: {t}; background: {b}; }} '
+            'QSpinBox {{ color: {t}; background: {g}; border: 1px solid {gr}; }}'
+            .format(t=_TXT, b=_BG, g=_GRID, gr=_GRID))
+
+        layout = QVBoxLayout(self)
+
+        head = QHBoxLayout()
+        head.addWidget(QLabel('Основной вариант: горизонт'))
+        self.hSpin = QSpinBox()
+        self.hSpin.setRange(1, 250)
+        self.hSpin.setValue(res['primary'][0])
+        head.addWidget(self.hSpin)
+        head.addWidget(QLabel('дней, спад >='))
+        self.tSpin = QSpinBox()
+        self.tSpin.setSuffix(' %')
+        self.tSpin.setRange(1, 100)
+        self.tSpin.setValue(int(res['primary'][1] * 100))
+        head.addWidget(self.tSpin)
+        self.recalcBtn = QPushButton('Пересчитать')
+        self.recalcBtn.clicked.connect(self._recalc)
+        head.addWidget(self.recalcBtn)
+        head.addStretch(1)
+        layout.addLayout(head)
+
+        gridLabel = QLabel('Доля сбывшихся крестов смерти (падавшая цена в течение горизонта):')
+        layout.addWidget(gridLabel)
+        layout.addWidget(self._build_grid())
+
+        detLabel = QLabel('Детали (основной вариант):')
+        layout.addWidget(detLabel)
+        layout.addWidget(self._build_details())
+
+        self.totalLabel = QLabel('')
+        layout.addWidget(self.totalLabel)
+
+        self._refresh_details()
+
+    def _build_grid(self):
+        tab = QTableWidget()
+        tab.setColumnCount(len(_THRESHOLDS) + 1)
+        tab.setHorizontalHeaderLabels(
+            ['Горизонт'] + ['-{}%'.format(int(t * 100)) for t in _THRESHOLDS])
+        tab.setRowCount(len(_HORIZONS))
+        for r, h in enumerate(_HORIZONS):
+            item = QTableWidgetItem('{} дн'.format(h))
+            item.setForeground(Qt.GlobalColor.white)
+            tab.setItem(r, 0, item)
+            for c, th in enumerate(_THRESHOLDS):
+                hits, total = self.res['grid'][(h, th)]
+                pct = (hits / total * 100) if total else 0
+                cell = QTableWidgetItem('{}/{} = {}%'.format(hits, total, round(pct)))
+                ok = pct >= 70 and total > 0
+                cell.setForeground(Qt.GlobalColor.darkGreen if ok
+                                   else Qt.GlobalColor.red)
+                tab.setItem(r, c + 1, cell)
+        tab.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        tab.verticalHeader().setVisible(False)
+        tab.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tab.setMaximumHeight(140)
+        return tab
+
+    def _build_details(self):
+        self.detailsTab = QTableWidget()
+        self.detailsTab.setColumnCount(4)
+        self.detailsTab.setHorizontalHeaderLabels(
+            ['Дата', 'Цена на сигнале', 'Мин. изменение %', 'Статус'])
+        self.detailsTab.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.detailsTab.verticalHeader().setVisible(False)
+        self.detailsTab.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.detailsTab.setMaximumHeight(230)
+        return self.detailsTab
+
+    def _refresh_details(self):
+        h, th = self.res['primary']
+        self.detailsTab.setRowCount(len(self.res['details']))
+        hits = nvalid = 0
+        for r, (date, close, min_chg, fulfilled, kind) in enumerate(self.res['details']):
+            self.detailsTab.setItem(r, 0, QTableWidgetItem(date))
+            self.detailsTab.setItem(r, 1, QTableWidgetItem('{:.2f}'.format(close)))
+            if min_chg is None:
+                self.detailsTab.setItem(r, 2, QTableWidgetItem('нет данных'))
+                self.detailsTab.setItem(
+                    r, 3, QTableWidgetItem('нет {} дн впереди'.format(h)))
+            else:
+                chg_item = QTableWidgetItem('{:+.1f}%'.format(min_chg * 100))
+                chg_item.setForeground(Qt.GlobalColor.darkGreen if fulfilled
+                                       else Qt.GlobalColor.red)
+                self.detailsTab.setItem(r, 2, chg_item)
+                status_item = QTableWidgetItem('СБЫЛСЯ' if fulfilled else 'нет')
+                status_item.setForeground(Qt.GlobalColor.darkGreen if fulfilled
+                                          else Qt.GlobalColor.red)
+                self.detailsTab.setItem(r, 3, status_item)
+                if fulfilled:
+                    hits += 1
+                nvalid += 1
+        pct = (hits / nvalid * 100) if nvalid else 0
+        self.totalLabel.setText(
+            'Итог: крестов смерти {} шт, сбывшихся {}/{} = {}% '
+            '(горизонт {} дн, спад >= {}%).'.format(
+                len(self.res['details']), hits, nvalid, round(pct), h, int(th * 100)))
+        return pct
+
+    def _recalc(self):
+        h = self.hSpin.value()
+        th = self.tSpin.value() / 100.0
+        res = analyze_death_crosses(self.dates, self.prices,
+                                    horizons=(h,), thresholds=(th,))
+        self.res['details'] = res['details']
+        self.res['primary'] = (h, th)
+        self._refresh_details()

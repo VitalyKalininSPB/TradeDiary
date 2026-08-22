@@ -97,6 +97,89 @@ class TableModel(QtCore.QAbstractTableModel):
         return QtCore.QAbstractTableModel.headerData(self, section, orientation, role)
 
 
+class OfficeAssistant(QtWidgets.QWidget):
+    """Скрепка Clippy из картинки + жёлтая реплика (ради прикола, без анимации)."""
+
+    def __init__(self, image_path="clippy.png"):
+        super(OfficeAssistant, self).__init__(None)
+        self._src = QtGui.QPixmap(image_path)
+        if self._src.isNull():
+            self._src = QtGui.QPixmap(10, 10)
+
+        self._phrases = [
+            "Это похоже на сделку?",
+            "Осторожнее с рисками!",
+            "Вы не забыли сохранить?",
+            "Корреляция в норме?",
+            "Шорти японскую йену!",
+            "Элина, покупай газпром на 650 руб.",
+        ]
+        self._quote = "\n".join((self._phrases[-1], self._phrases[-2]))
+
+        # Масштаб картинки под разумный размер (целиком на экране).
+        target_h = 250
+        self._pixmap = self._src.scaledToHeight(
+            target_h, QtCore.Qt.TransformationMode.SmoothTransformation)
+        bub_w = 420
+        bub_h = 120
+        self.setFixedSize(bub_w + 18 + self._pixmap.width(),
+                          max(bub_h, self._pixmap.height()))
+
+        self.setWindowFlags(QtCore.Qt.WindowType.Tool
+                            | QtCore.Qt.WindowType.FramelessWindowHint
+                            | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setToolTip("Кликните, чтобы я дал совет.")
+        self._place()
+
+    def _place(self):
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        x = screen.right() - self.width() - 8
+        y = screen.center().y() - self.height() // 2
+        y = max(screen.top() + 4, min(y, screen.bottom() - self.height() - 4))
+        self.move(x, y)
+
+    def mousePressEvent(self, event):
+        import random
+        self._quote = random.choice(self._phrases)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        if self._quote is not None:
+            self._drawBubble(p)
+
+        bx = self.width() - self._pixmap.width() - 6
+        by = max(6, (self.height() - self._pixmap.height()) // 2)
+        p.drawPixmap(bx, by, self._pixmap)
+
+        p.end()
+
+    def _drawBubble(self, p):
+        rect = QtCore.QRect(8, 6, self.width() - self._pixmap.width() - 26 - 16, 120)
+        bubble = QtGui.QPainterPath()
+        bubble.addRoundedRect(rect, 18, 18)
+        tail = QtGui.QPainterPath()
+        tail.moveTo(rect.right() - 30, rect.bottom() - 6)
+        tail.lineTo(rect.right() + 6, rect.bottom() + 18)
+        tail.lineTo(rect.right(), rect.bottom() - 2)
+        tail.closeSubpath()
+        bubble = bubble.united(tail)
+        p.setPen(QtGui.QPen(QtGui.QColor(120, 96, 10), 2))
+        p.setBrush(QtGui.QColor(255, 236, 148))
+        p.drawPath(bubble)
+
+        p.setPen(QtGui.QColor(60, 45, 5))
+        f = QtGui.QFont('Sans', 12)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(rect.adjusted(16, 10, -16, -10),
+                   QtCore.Qt.AlignmentFlag.AlignCenter, self._quote)
+
+
 class TradeDiary(QtWidgets.QMainWindow):
     def __init__(self):
         super(TradeDiary, self).__init__()
@@ -781,4 +864,7 @@ if __name__ == "__main__":
     app.setStyleSheet(DARK_QSS)
     widget = TradeDiary()
     widget.show()
+    # Скрепка отключена (код сохранён, см. класс OfficeAssistant выше).
+    # assistant = OfficeAssistant()
+    # assistant.show()
     sys.exit(app.exec_())
