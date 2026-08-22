@@ -147,23 +147,32 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.tradeTableView.setIndexWidget(self.model.index(row, 13), ca_btn)
             self._chartButtons.append(ca_btn)
 
-    def chartClicked(self, row):
-        from ma_chart_dialog import MAChartDialog
+    def _openNonModal(self, kind, row):
+        """Open a chart dialog non-modally so several can be visible at once."""
         if row >= len(self.data):
             return
         r = self.data[row]
-        dlg = MAChartDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
-        dlg.exec()
+        if kind == 'ma':
+            from ma_chart_dialog import MAChartDialog
+            dlg = MAChartDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
+        else:
+            from candles_dialog import CandlesDialog
+            dlg = CandlesDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
+    def _dialogs_set(self):
+        if not hasattr(self, '_open_dialogs'):
+            self._open_dialogs = set()
+        return self._open_dialogs
+
+    def chartClicked(self, row):
+        self._openNonModal('ma', row)
 
     def candlesClicked(self, row):
-        from candles_dialog import CandlesDialog
-        if row >= len(self.data):
-            return
-        r = self.data[row]
-        dlg = CandlesDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
-        dlg.exec()
-        self.dealHistoryButton.clicked.connect(self.dealHistoryClicked)
-        self.show()
+        self._openNonModal('candles', row)
 
     def openTickers(self):
         """Return {ticker: currency} of currently open portfolio positions."""
@@ -305,7 +314,10 @@ class TradeDiary(QtWidgets.QMainWindow):
                 'Need at least two assets in the portfolio to build a matrix.')
             return
         dlg = CorrelationDialog(tickers, matrix, getattr(self, '_portfolio_corr', 0.0), self)
-        dlg.exec()
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
 
     def clearDbClicked(self):
         ret = QtWidgets.QMessageBox.question(
