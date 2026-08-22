@@ -53,7 +53,8 @@ class TableModel(QtCore.QAbstractTableModel):
             'Close At', \
             'What\'s next', \
             'Notes', \
-            'Chart']
+            'Chart', \
+            'Candles']
 
     def __init__(self, data):
         super(TableModel, self).__init__()
@@ -66,7 +67,7 @@ class TableModel(QtCore.QAbstractTableModel):
                 return trade_system_name(self._data[index.row()][col])
             if col == 12:
                 return ''
-            return self._data[index.row()][col]
+            return self._data[index.row()][col] if col != 13 else ''
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if (self._data[index.row()][4] > self._data[index.row()][1]):
                 return QtGui.QBrush(QtGui.QColor(42, 106, 64))
@@ -110,6 +111,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.model.modelReset.connect(self._rebuildChartButtons)
         self.tradeTableView.horizontalHeader().setSectionResizeMode(
             12, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.tradeTableView.horizontalHeader().setSectionResizeMode(
+            13, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.longButton.clicked.connect(self.longClicked)
         self.shortButton.clicked.connect(self.shortClicked)
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
@@ -121,6 +124,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
+        self.tradeTableView.setColumnWidth(13, 80)
 
     def _rebuildChartButtons(self):
         for w in self._chartButtons:
@@ -131,12 +135,17 @@ class TradeDiary(QtWidgets.QMainWindow):
             return
         rows = getattr(self, 'data', [])
         for row in range(len(rows)):
-            btn = QtWidgets.QPushButton('Chart')
-            btn.setFixedSize(64, 24)
-            ticker = str(rows[row][0] or '')
-            btn.clicked.connect(lambda checked=False, r=row: self.chartClicked(r))
-            self.tradeTableView.setIndexWidget(self.model.index(row, 12), btn)
-            self._chartButtons.append(btn)
+            ma_btn = QtWidgets.QPushButton('Chart')
+            ma_btn.setFixedSize(62, 24)
+            ma_btn.clicked.connect(lambda checked=False, r=row: self.chartClicked(r))
+            self.tradeTableView.setIndexWidget(self.model.index(row, 12), ma_btn)
+            self._chartButtons.append(ma_btn)
+
+            ca_btn = QtWidgets.QPushButton('Candles')
+            ca_btn.setFixedSize(74, 24)
+            ca_btn.clicked.connect(lambda checked=False, r=row: self.candlesClicked(r))
+            self.tradeTableView.setIndexWidget(self.model.index(row, 13), ca_btn)
+            self._chartButtons.append(ca_btn)
 
     def chartClicked(self, row):
         from ma_chart_dialog import MAChartDialog
@@ -144,6 +153,14 @@ class TradeDiary(QtWidgets.QMainWindow):
             return
         r = self.data[row]
         dlg = MAChartDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
+        dlg.exec()
+
+    def candlesClicked(self, row):
+        from candles_dialog import CandlesDialog
+        if row >= len(self.data):
+            return
+        r = self.data[row]
+        dlg = CandlesDialog(str(r[0] or ''), str(r[12] or ''), r[3], r[9], self)
         dlg.exec()
         self.dealHistoryButton.clicked.connect(self.dealHistoryClicked)
         self.show()
