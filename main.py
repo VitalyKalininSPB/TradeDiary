@@ -19,6 +19,7 @@ from DealDialog import DirectionType
 
 import requests, zipfile, io
 import markets
+import price_history
 
 class TableModel(QtCore.QAbstractTableModel):
 
@@ -44,11 +45,14 @@ class TableModel(QtCore.QAbstractTableModel):
             return self._data[index.row()][index.column()]
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if (self._data[index.row()][4] > self._data[index.row()][1]):
-                return QtGui.QBrush(QtGui.QColor(128,100,128))
+                return QtGui.QBrush(QtGui.QColor(42, 106, 64))
             elif (self._data[index.row()][4] < self._data[index.row()][1]):
-                return QtGui.QBrush(QtGui.QColor(100,128,128))
+                return QtGui.QBrush(QtGui.QColor(140, 46, 46))
             else:
-                return QtGui.QBrush(QtCore.Qt.GlobalColor.white)
+                return QtGui.QBrush(QtGui.QColor(28, 29, 34))
+        if role == QtCore.Qt.ItemDataRole.ForegroundRole:
+            if (self._data[index.row()][4] != self._data[index.row()][1]):
+                return QtGui.QBrush(QtGui.QColor(255, 255, 255))
 
     def setData(self, data):
         self._data = data
@@ -83,7 +87,162 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.balanceEdit.editingFinished.connect(self.balanceEdited)
         self.recalcBalance()
         self.setupMacro()
+        self.setupCorrelation()
+        self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
+        self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.show()
+
+    def openTickers(self):
+        """Return {ticker: currency} of currently open portfolio positions."""
+        out = {}
+        for row in self.data:
+            if row[9]:
+                continue
+            ticker = row[0].strip()
+            currency = row[12].strip() or markets.USD
+            if ticker:
+                out[ticker] = currency
+        return out
+
+    def setupCorrelation(self):
+        assets = self.openTickers()
+        for ticker, currency in assets.items():
+            price_history.ensure_history(ticker, currency)
+        self.refreshCorrelation()
+
+    def refreshCorrelation(self):
+        assets = self.openTickers()
+        tickers, matrix, _ = price_history.build_correlation(assets)
+        weights = self._assetWeightsUsd(assets)
+        if weights:
+            w = [weights.get(str(t), 0.0) for t in tickers]
+            corr = price_history.weighted_portfolio_corr(matrix, w)
+        else:
+            corr = 0.0
+        self._portfolio_corr = corr
+        self._corr_matrix = matrix
+        self._corr_tickers = tickers
+        value = int(round(corr * 100))
+        self.corrProgressBar.setValue(value)
+        r, g, b = self._corrColor(corr)
+        text_color = QtGui.QColor(0, 0, 0) if 0.299*r + 0.587*g + 0.114*b > 160 else QtGui.QColor(255, 255, 255)
+        self.corrProgressBar.setStyleSheet(
+            "QProgressBar {{ color: rgb({}, {}, {}); border: 1px solid gray; text-align: center; }}"
+            "QProgressBar::chunk {{ background-color: rgb({}, {}, {}); border-radius: 3px; }}"
+            "QProgressBar {{ background-color: rgba(128,128,128,40); }}"
+            .format(text_color.red(), text_color.green(), text_color.blue(), r, g, b))
+        self.corrProgressBar.setFormat('{:.2f}'.format(corr))
+        comment, tip = self._corrFeedback(corr)
+        self.corrCommentLabel.setText(comment)
+        self.corrCommentLabel.setStyleSheet(
+            'color: rgb({}, {}, {}); font-weight: bold;'.format(r, g, b))
+        self.corrCommentLabel.setToolTip(tip)
+        self.corrProgressBar.setToolTip(
+            '{} asset(s), portfolio correlation {:.2f}\n{}'
+            .format(len(tickers), corr, tip))
+
+    def _assetWeightsUsd(self, assets):
+        """USD-value-weighted position shares for the given open assets."""
+        usd = {}
+        for ticker, currency in assets.items():
+            value = 0.0
+            for row in self.data:
+                if row[0].strip() != ticker:
+                    continue
+                try:
+                    amount = float(row[2] or 0)
+                    price = float(row[1] or 0)
+                except ValueError:
+                    continue
+                if currency == markets.RUB:
+                    rate = markets.fetch_usd_rate()
+                    value += price * amount / rate if rate else 0.0
+                else:
+                    value += price * amount
+            usd[ticker] = value
+        total = sum(usd.values())
+        if total <= 0:
+            return {}
+        return {t: v / total for t, v in usd.items()}
+
+    # Correlation "zones" (value-weighted mean pairwise correlation):
+    #   below +0.20 -> too conservative (assets barely co-move)
+    #   +0.35 ... +0.55 -> "sweet spot" (moderate diversification + cohesion)
+    #   above +0.70 -> too risky (assets move together -> concentration risk)
+    # Gradients are interpolated between these anchor colors so the bar shows a
+    # smooth, readable scale with the good zone clearly green.
+    _CORR_ANCHORS = [
+        (-1.00, (170, 190, 210)),  # strongly anti-correlated (conservative edge)
+        (0.20, (150, 175, 195)),   # start of the "too conservative" band
+        (0.30, (120, 190, 120)),   # transition into green
+        (0.35, (70, 190, 90)),     # start of the good ("sweet spot") zone
+        (0.55, (50, 170, 80)),     # end of the good zone
+        (0.65, (210, 160, 60)),    # growing risk -> amber
+        (0.70, (230, 90, 40)),     # start of the high-risk band
+        (1.00, (220, 40, 40)),     # max concentration risk -> red
+    ]
+
+    def _corrColor(self, value):
+        anchors = self._CORR_ANCHORS
+
+        def lerp(a, b, t):
+            return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+        if value <= anchors[0][0]:
+            return anchors[0][1]
+        for (x0, c0), (x1, c1) in zip(anchors, anchors[1:]):
+            if value <= x1:
+                t = (value - x0) / (x1 - x0) if x1 != x0 else 0.0
+                return lerp(c0, c1, t)
+        return anchors[-1][1]
+
+    def _corrFeedback(self, value):
+        # Returns (short comment shown under the thermometer, abstract tooltip).
+        if value > 0.70:
+            return ('Риск', (
+                'Очень высокая корреляция (выше +0.70): активы движутся почти '
+                'синхронно. Если рынок падает, весь портфель падает вместе — '
+                'высокий риск концентрации, диверсификация почти не работает.'))
+        if value >= 0.55:
+            return ('Повышенный', (
+                'Корреляция выше "золотой зоны" но ещё не в зоне риска '
+                '(+0.55...+0.70): активы довольно схожи по динамике, полезно '
+                'проверить, нет ли дублирующихся позиций.'))
+        if value > 0.35:
+            return ('Хорошо', (
+                'Корреляция в "золотой зоне" (+0.35...+0.55): активы движутся '
+                'умеренно согласованно — баланс между диверсификацией и '
+                'устойчивостью портфеля.'))
+        if value >= 0.20:
+            return ('Нейтрально', (
+                'Средняя корреляция (+0.20...+0.35): между зоной риска и '
+                'консервативностью — приемлемый уровень разнообразия активов.'))
+        return ('Консервативно', (
+            'Очень низкая корреляция (ниже +0.20): активы почти не связаны, '
+            'портфель сверхдиверсифицирован. Рост одного может не тянуть за '
+            'собой остальные — часть потенциальной доходности упускается.'))
+
+    def correlationMatrixClicked(self):
+        from correlation_dialog import CorrelationDialog
+        tickers = getattr(self, '_corr_tickers', None)
+        matrix = getattr(self, '_corr_matrix', None)
+        if tickers is None or len(tickers) < 2 or matrix is None:
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Correlation',
+                'Need at least two assets in the portfolio to build a matrix.')
+            return
+        dlg = CorrelationDialog(tickers, matrix, getattr(self, '_portfolio_corr', 0.0), self)
+        dlg.exec()
+
+    def clearDbClicked(self):
+        ret = QtWidgets.QMessageBox.question(
+            self.window(), 'Clear DB',
+            'Delete all cached price history? History will be refetched when '
+            'tickers are added again.',
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        if ret == QtWidgets.QMessageBox.StandardButton.Yes:
+            price_history.clear_db()
+            self.refreshCorrelation()
 
     def setupMacro(self):
         import random
@@ -246,6 +405,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.data.append(deal.toArray())
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
+            self.onTickerAdded(deal.ticker, deal.currency)
         else:
             print("Cancel!")
 
@@ -271,6 +431,11 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.data.append(deal.toArray())
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
+            self.onTickerAdded(deal.ticker, deal.currency)
+
+    def onTickerAdded(self, ticker, currency):
+        price_history.ensure_history(ticker, currency)
+        self.refreshCorrelation()
 
     def editClicked(self, item):
         print("Edit clicked " + str(item.row()))
@@ -305,8 +470,39 @@ class TradeDiary(QtWidgets.QMainWindow):
         print(currentStocks)
 
 
+DARK_QSS = """
+QMainWindow, QDialog, QWidget { background-color: #1e1f24; color: #dcdce0; }
+QTableView { background-color: #1a1b20; alternate-background-color: #23242b;
+             color: #f0f0f4; gridline-color: #464a56;
+             selection-background-color: #3d5a80; selection-color: #ffffff; }
+QTableView::item { padding: 2px; }
+QHeaderView::section { background-color: #33353f; color: #e8e8ee;
+                       border: 1px solid #4a4e5a; padding: 4px;
+                       font-weight: bold; }
+QLineEdit, QPlainTextEdit { background-color: #16171c; color: #e6e6ea;
+                            border: 1px solid #3a3c46; border-radius: 3px;
+                            selection-background-color: #3d5a80; }
+QPushButton { background-color: #30323c; color: #dcdce0; border: 1px solid #43464f;
+              border-radius: 4px; padding: 3px 8px; }
+QPushButton:hover { background-color: #3a3d49; }
+QPushButton:pressed { background-color: #26282f; }
+QLabel { color: #dcdce0; }
+QProgressBar { text-align: center; border: 1px solid #43464f; border-radius: 4px;
+               background-color: #26272e; }
+QMenuBar, QStatusBar { background-color: #26272e; color: #dcdce0; }
+QMenuBar::item { background: transparent; }
+QMenuBar::item:selected { background: #3a3d49; }
+QScrollBar:vertical { background: #1e1f24; width: 12px; }
+QScrollBar::handle:vertical { background: #3a3c46; border-radius: 6px; min-height: 20px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QToolTip { background-color: #26272e; color: #e6e6ea; border: 1px solid #43464f; }
+"""
+
+
 if __name__ == "__main__":
     app = QApplication([])
+    app.setStyle("Fusion")
+    app.setStyleSheet(DARK_QSS)
     widget = TradeDiary()
     widget.show()
     sys.exit(app.exec_())
