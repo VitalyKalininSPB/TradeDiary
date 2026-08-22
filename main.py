@@ -82,7 +82,38 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
         self.balanceEdit.editingFinished.connect(self.balanceEdited)
         self.recalcBalance()
+        self.setupMacro()
         self.show()
+
+    def setupMacro(self):
+        import random
+        value = random.randint(-10, 10)
+        self.macroProgressBar.setValue(value)
+        color = self._macroColor(value)
+        r, g, b = color
+        text_color = QtGui.QColor(0, 0, 0) if 0.299*r + 0.587*g + 0.114*b > 160 else QtGui.QColor(255, 255, 255)
+        self.macroProgressBar.setStyleSheet(
+            "QProgressBar {{ color: rgb({}, {}, {}); border: 1px solid gray; text-align: center; }}"
+            "QProgressBar::chunk {{ background-color: rgb({}, {}, {}); border-radius: 3px; }}"
+            "QProgressBar {{ background-color: rgba(128,128,128,40); }}"
+            .format(text_color.red(), text_color.green(), text_color.blue(),
+                    r, g, b)
+        )
+
+    def _macroColor(self, value):
+        def lerp(a, b, t):
+            return int(a + (b - a) * t)
+        if value <= 0:
+            t = (value + 10) / 10.0
+            r = lerp(20, 90, t)
+            g = lerp(90, 200, t)
+            b = lerp(215, 200, t)
+        else:
+            t = value / 10.0
+            r = lerp(200, 215, t)
+            g = lerp(200, 30, t)
+            b = lerp(200, 30, t)
+        return (r, g, b)
 
     def load_ui(self):
         loadUi("form.ui", self)

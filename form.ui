@@ -144,6 +144,41 @@
      <string>Update</string>
     </property>
    </widget>
+   <widget class="QLabel" name="macroLabel">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>560</y>
+      <width>53</width>
+      <height>17</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Макро:</string>
+    </property>
+   </widget>
+   <widget class="QProgressBar" name="macroProgressBar">
+    <property name="geometry">
+     <rect>
+      <x>78</x>
+      <y>556</y>
+      <width>600</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="minimum">
+     <number>-10</number>
+    </property>
+    <property name="maximum">
+     <number>10</number>
+    </property>
+    <property name="value">
+     <number>0</number>
+    </property>
+    <property name="format">
+     <string>%v°</string>
+    </property>
+   </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">
