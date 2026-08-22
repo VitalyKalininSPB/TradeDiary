@@ -1,0 +1,134 @@
+# -*- coding: utf-8 -*-
+
+################################################################################
+## Form generated from reading UI file 'deal.ui'
+##
+## Created by: Qt User Interface Compiler version 6.11.2
+##
+## WARNING! All changes made in this file will be lost when recompiling UI file!
+################################################################################
+
+from PySide6.QtCore import (QCoreApplication, QDate, QDateTime, QLocale,
+    QMetaObject, QObject, QPoint, QRect,
+    QSize, QTime, QUrl, Qt)
+from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
+    QFont, QFontDatabase, QGradient, QIcon,
+    QImage, QKeySequence, QLinearGradient, QPainter,
+    QPalette, QPixmap, QRadialGradient, QTransform)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox, QDialog,
+    QDialogButtonBox, QFrame, QLabel, QLineEdit,
+    QSizePolicy, QWidget)
+
+class Ui_Deal(object):
+    def setupUi(self, Deal):
+        if not Deal.objectName():
+            Deal.setObjectName(u"Deal")
+        Deal.resize(600, 446)
+        self.label_3 = QLabel(Deal)
+        self.label_3.setObjectName(u"label_3")
+        self.label_3.setGeometry(QRect(5, 87, 91, 17))
+        self.takeprofitEdit = QLineEdit(Deal)
+        self.takeprofitEdit.setObjectName(u"takeprofitEdit")
+        self.takeprofitEdit.setGeometry(QRect(357, 186, 71, 25))
+        self.label = QLabel(Deal)
+        self.label.setObjectName(u"label")
+        self.label.setGeometry(QRect(5, 9, 81, 17))
+        self.label_4 = QLabel(Deal)
+        self.label_4.setObjectName(u"label_4")
+        self.label_4.setGeometry(QRect(5, 127, 121, 17))
+        self.label_5 = QLabel(Deal)
+        self.label_5.setObjectName(u"label_5")
+        self.label_5.setGeometry(QRect(10, 190, 111, 17))
+        self.priceEdit = QLineEdit(Deal)
+        self.priceEdit.setObjectName(u"priceEdit")
+        self.priceEdit.setGeometry(QRect(115, 84, 111, 25))
+        self.ticketEdit = QLineEdit(Deal)
+        self.ticketEdit.setObjectName(u"ticketEdit")
+        self.ticketEdit.setGeometry(QRect(115, 39, 113, 25))
+        self.openDateLabel = QLabel(Deal)
+        self.openDateLabel.setObjectName(u"openDateLabel")
+        self.openDateLabel.setGeometry(QRect(95, 9, 250, 17))
+        self.label_7 = QLabel(Deal)
+        self.label_7.setObjectName(u"label_7")
+        self.label_7.setGeometry(QRect(22, 42, 67, 17))
+        font = QFont()
+        font.setPointSize(16)
+        font.setBold(True)
+        self.label_7.setFont(font)
+        self.buttonBox_2 = QDialogButtonBox(Deal)
+        self.buttonBox_2.setObjectName(u"buttonBox_2")
+        self.buttonBox_2.setGeometry(QRect(10, 400, 341, 32))
+        self.buttonBox_2.setOrientation(Qt.Horizontal)
+        self.buttonBox_2.setStandardButtons(QDialogButtonBox.Cancel|QDialogButtonBox.Ok)
+        self.amountEdit = QLineEdit(Deal)
+        self.amountEdit.setObjectName(u"amountEdit")
+        self.amountEdit.setGeometry(QRect(115, 121, 111, 25))
+        self.stoplossEdit = QLineEdit(Deal)
+        self.stoplossEdit.setObjectName(u"stoplossEdit")
+        self.stoplossEdit.setGeometry(QRect(120, 186, 71, 25))
+        self.label_6 = QLabel(Deal)
+        self.label_6.setObjectName(u"label_6")
+        self.label_6.setGeometry(QRect(247, 190, 111, 17))
+        self.label_9 = QLabel(Deal)
+        self.label_9.setObjectName(u"label_9")
+        self.label_9.setGeometry(QRect(12, 280, 101, 17))
+        self.comboBox = QComboBox(Deal)
+        self.comboBox.addItem("")
+        self.comboBox.addItem("")
+        self.comboBox.setObjectName(u"comboBox")
+        self.comboBox.setGeometry(QRect(138, 275, 241, 25))
+        self.frame = QFrame(Deal)
+        self.frame.setObjectName(u"frame")
+        self.frame.setGeometry(QRect(20, 310, 361, 80))
+        self.frame.setFrameShape(QFrame.StyledPanel)
+        self.frame.setFrameShadow(QFrame.Raised)
+        self.infoLabel = QLabel(self.frame)
+        self.infoLabel.setObjectName(u"infoLabel")
+        self.infoLabel.setGeometry(QRect(10, 10, 341, 61))
+        self.infoLabel.setWordWrap(True)
+        self.slUnitLabel = QLabel(Deal)
+        self.slUnitLabel.setObjectName(u"slUnitLabel")
+        self.slUnitLabel.setGeometry(QRect(196, 190, 41, 17))
+        self.tpUnitLabel = QLabel(Deal)
+        self.tpUnitLabel.setObjectName(u"tpUnitLabel")
+        self.tpUnitLabel.setGeometry(QRect(436, 190, 41, 17))
+        self.priceUnitLabel = QLabel(Deal)
+        self.priceUnitLabel.setObjectName(u"priceUnitLabel")
+        self.priceUnitLabel.setGeometry(QRect(232, 88, 41, 17))
+        self.priceRubLabel = QLabel(Deal)
+        self.priceRubLabel.setObjectName(u"priceRubLabel")
+        self.priceRubLabel.setGeometry(QRect(270, 90, 141, 17))
+        self.stopLossRubLabel = QLabel(Deal)
+        self.stopLossRubLabel.setObjectName(u"stopLossRubLabel")
+        self.stopLossRubLabel.setGeometry(QRect(120, 220, 121, 17))
+        self.takeProfitRubLabel = QLabel(Deal)
+        self.takeProfitRubLabel.setObjectName(u"takeProfitRubLabel")
+        self.takeProfitRubLabel.setGeometry(QRect(360, 220, 121, 17))
+
+        self.retranslateUi(Deal)
+
+        QMetaObject.connectSlotsByName(Deal)
+    # setupUi
+
+    def retranslateUi(self, Deal):
+        Deal.setWindowTitle(QCoreApplication.translate("Deal", u"Dialog", None))
+        self.label_3.setText(QCoreApplication.translate("Deal", u"Stock Price:", None))
+        self.label.setText(QCoreApplication.translate("Deal", u"Open Date:", None))
+        self.label_4.setText(QCoreApplication.translate("Deal", u"Stocks Amount", None))
+        self.label_5.setText(QCoreApplication.translate("Deal", u"Stop Loss:", None))
+        self.openDateLabel.setText(QCoreApplication.translate("Deal", u"TextLabel", None))
+        self.label_7.setText(QCoreApplication.translate("Deal", u"Ticker:", None))
+        self.label_6.setText(QCoreApplication.translate("Deal", u"Take Profit:", None))
+        self.label_9.setText(QCoreApplication.translate("Deal", u"Trade System:", None))
+        self.comboBox.setItemText(0, QCoreApplication.translate("Deal", u"Average MA", None))
+        self.comboBox.setItemText(1, QCoreApplication.translate("Deal", u"MACD", None))
+
+        self.infoLabel.setText("")
+        self.slUnitLabel.setText(QCoreApplication.translate("Deal", u"pt", None))
+        self.tpUnitLabel.setText(QCoreApplication.translate("Deal", u"pt", None))
+        self.priceUnitLabel.setText(QCoreApplication.translate("Deal", u"pt", None))
+        self.priceRubLabel.setText(QCoreApplication.translate("Deal", u"TextLabel", None))
+        self.stopLossRubLabel.setText(QCoreApplication.translate("Deal", u"TextLabel", None))
+        self.takeProfitRubLabel.setText(QCoreApplication.translate("Deal", u"TextLabel", None))
+    # retranslateUi
+
