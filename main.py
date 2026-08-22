@@ -16,10 +16,27 @@ import xml.dom.minidom
 from DealDialog import DealDialog
 from DealDialog import Deal
 from DealDialog import DirectionType
+from DealDialog import FutureUtil
 
 import requests, zipfile, io
 import markets
 import price_history
+
+# ---------------------------------------------------------------------------
+# TODO(потом в GUI): константы позиционной риска. Пока захардкожены, вынести в настройки.
+# Модель риска: масштабируется от корреляции портфеля (см. корреляционный термометр).
+# Bасис 2% в "хорошей" зоне (+0.35..+0.55); при концентрации риск режется, при
+# диверсификации повышается. Список — (верхняя граница корреляции, риск на позицию),
+# упорядочен по убыванию корреляции; выбирается ПОСЛЕДВИЙ интервал, в который попадает corr.
+RISK_BY_CORR = [          # TODO(в GUI): заменить на редактируемую таблицу
+    (1.00, 0.010),        # > +0.70 — высокая концентрация: самые низкий риск
+    (0.70, 0.015),        # +0.55..+0.70 — повышенный риск
+    (0.55, 0.020),        # +0.35..+0.55 — "хорошая" зона: BАСИС 2%
+    (0.35, 0.020),        # +0.20..+0.35 — нейтрально
+    (0.20, 0.025),        # <= +0.20 — сверхдиверсифицировано: можно больше
+]
+RR = 2.0                  # TODO(в GUI): соотношение TP:SL (1:2)
+# ---------------------------------------------------------------------------
 
 class TableModel(QtCore.QAbstractTableModel):
 
@@ -90,6 +107,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.setupCorrelation()
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
+        self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.show()
 
     def openTickers(self):
@@ -449,6 +467,144 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.data[item.row()][11] = dlg.notesEdit.toPlainText()
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
+
+    def _riskPercentForCorr(self, corr):
+        """Risk per position (%) for the current portfolio correlation.
+
+        Selects the highest interval in RISK_BY_CORR whose upper bound is >= corr,
+        i.e. the band the correlation currently falls into.
+        TODO(в GUI): этот подбор инф-полем можно перенести в настройки.
+        """
+        for bound, risk in RISK_BY_CORR:
+            if corr <= bound:
+                return risk
+        return RISK_BY_CORR[-1][1]
+
+    def _dealDirection(self, row):
+        """Infer long/short for a deal row. Direction is not stored in the model.
+
+        TODO(в GUI): добавить явное поле direction; пока infer:
+          1) по заданному SL (row[6]); 2) иначе по TP (row[5]); 3) иначе Long.
+        Returns 'LONG' or 'SHORT'.
+        """
+        try:
+            price = float(row[1] or 0)
+        except ValueError:
+            price = 0.0
+
+        def _num(idx):
+            try:
+                return float(row[idx] or 0)
+            except ValueError:
+                return 0.0
+
+        sl = _num(6)
+        if sl != 0:
+            return 'SHORT' if sl > price else 'LONG'
+        tp = _num(5)
+        if tp != 0:
+            return 'SHORT' if tp < price else 'LONG'
+        return 'LONG'
+
+    def recalcSlTpClicked(self):
+        """Recalculate recommended SL/TP for every open position.
+
+        Budget per position = risk% (scaled by portfolio correlation) of total
+        equity; TP is RR:1 of the resulting risk distance. Only stock positions
+        are processed (futures skipped for now, see TODO).
+        TODO(в GUI): продумать распределение СОВОКУПНОГО риска между позициями
+        и явное поле direction; фьючерсы (pointPrice) пока не поддерживаются.
+        """
+        assets = self.openTickers()
+        if not assets:
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Recalc SL/TP',
+                'No open positions to recalculate.')
+            return
+
+        equity = self.totalEquityUsd()
+        if equity <= 0:
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Recalc SL/TP',
+                'Equity is not positive ({}), cannot size risk.'.format(
+                    '{:.2f}'.format(equity)))
+            return
+
+        corr = getattr(self, '_portfolio_corr', 0.0)
+        risk_pct = self._riskPercentForCorr(corr)
+        risk_budget_usd = equity * risk_pct
+
+        changed = 0
+        skipped = []
+        for row in self.data:
+            if row[9]:          # закрытая сделка — пропускаем
+                continue
+            ticker = row[0].strip()
+            try:
+                price = float(row[1] or 0)
+                amount = float(row[2] or 0)
+            except ValueError:
+                skipped.append(ticker + ' (нечисловые данные)')
+                continue
+            if amount <= 0 or price <= 0:
+                skipped.append(ticker + ' (amount/price <= 0)')
+                continue
+
+            if FutureUtil.is_future(self._fakeDeal(ticker)):
+                skipped.append(ticker + ' (фьючерс, пока не поддерживается)')
+                continue
+
+            # Локальный риск-бюджет в валюте сделки.
+            currency = row[12].strip()
+            if currency == markets.RUB:
+                rate = markets.fetch_usd_rate()
+                if not rate:
+                    skipped.append(ticker + ' (нет курса USD/RUB)')
+                    continue
+                budget_local = risk_budget_usd * rate
+            else:
+                budget_local = risk_budget_usd  # валюты USD/иные считаем как есть
+
+            risk_per_stock = budget_local / amount
+            direction = self._dealDirection(row)
+            if direction == 'LONG':
+                sl = price - risk_per_stock
+                tp = price + RR * risk_per_stock
+            else:
+                sl = price + risk_per_stock
+                tp = price - RR * risk_per_stock
+
+            # Сохраняем с разумной точностью для соответствующей валюты цены.
+            row[6] = self._priceStr(sl, currency)
+            row[5] = self._priceStr(tp, currency)
+            changed += 1
+
+        self.tradeTableView.model().layoutChanged.emit()
+        self.recalcBalance()
+
+        if changed:
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Recalc SL/TP',
+                'Recalculated SL/TP for {} position(s).\n'
+                'Risk used: {:.2f}% of equity (portfolio corr {:.2f}).'
+                .format(changed, risk_pct * 100.0, corr)
+                + (('\nSkipped: ' + ', '.join(skipped)) if skipped else ''))
+        else:
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Recalc SL/TP',
+                'Nothing recalculated.' + ((' Skipped: ' + ', '.join(skipped)) if skipped else ''))
+
+    def _fakeDeal(self, ticker):
+        """Minimal Deal-compatible object so FutureUtil can inspect the ticker."""
+        from DealDialog import Deal
+        d = Deal()
+        d.ticker = ticker
+        return d
+
+    @staticmethod
+    def _priceStr(value, currency):
+        """Format a price for storage (2 decimals for USD-ish, 2 for RUB too)."""
+        return '{:.2f}'.format(value)
 
     def updatePricesClicked(self):
         print("Update prices")

@@ -131,6 +131,19 @@
      <string>Short</string>
     </property>
    </widget>
+   <widget class="QPushButton" name="recalcSlTpButton">
+    <property name="geometry">
+     <rect>
+      <x>604</x>
+      <y>10</y>
+      <width>110</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Recalc SL/TP</string>
+    </property>
+   </widget>
    <widget class="QPushButton" name="updatePricesButton">
     <property name="geometry">
      <rect>
