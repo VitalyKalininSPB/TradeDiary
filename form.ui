@@ -4,15 +4,15 @@
  <widget class="QMainWindow" name="TradeDiary">
   <property name="geometry">
    <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>1127</width>
-    <height>600</height>
-   </rect>
-  </property>
-  <property name="windowTitle">
-   <string>TradeDiary</string>
-  </property>
+     <x>0</x>
+     <y>0</y>
+     <width>1127</width>
+     <height>660</height>
+    </rect>
+   </property>
+   <property name="windowTitle">
+    <string>TradeDiary</string>
+   </property>
   <widget class="QWidget" name="centralwidget">
    <widget class="QLineEdit" name="equityEdit">
     <property name="geometry">
@@ -205,6 +205,19 @@
      <string>%v°</string>
     </property>
    </widget>
+   <widget class="QPushButton" name="macroButton">
+    <property name="geometry">
+     <rect>
+      <x>790</x>
+      <y>556</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Макро</string>
+    </property>
+   </widget>
    <widget class="QLabel" name="corrLabel">
     <property name="geometry">
      <rect>
@@ -274,6 +287,32 @@
     </property>
     <property name="text">
      <string>Clear DB</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="quantitiveAssessmentButton">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>622</y>
+      <width>150</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Quant. Assessment</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="qualitativeAssessmentButton">
+    <property name="geometry">
+     <rect>
+      <x>180</x>
+      <y>622</y>
+      <width>150</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Qual. Assessment</string>
     </property>
    </widget>
   </widget>

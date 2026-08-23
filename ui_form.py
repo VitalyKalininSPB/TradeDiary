@@ -23,7 +23,7 @@ class Ui_TradeDiary(object):
     def setupUi(self, TradeDiary):
         if not TradeDiary.objectName():
             TradeDiary.setObjectName(u"TradeDiary")
-        TradeDiary.resize(1127, 600)
+        TradeDiary.resize(1127, 660)
         self.centralwidget = QWidget(TradeDiary)
         self.centralwidget.setObjectName(u"centralwidget")
         self.equityEdit = QLineEdit(self.centralwidget)
@@ -74,6 +74,9 @@ class Ui_TradeDiary(object):
         self.macroProgressBar.setMinimum(-10)
         self.macroProgressBar.setMaximum(10)
         self.macroProgressBar.setValue(0)
+        self.macroButton = QPushButton(self.centralwidget)
+        self.macroButton.setObjectName(u"macroButton")
+        self.macroButton.setGeometry(QRect(790, 556, 100, 25))
         self.corrLabel = QLabel(self.centralwidget)
         self.corrLabel.setObjectName(u"corrLabel")
         self.corrLabel.setGeometry(QRect(410, 560, 53, 17))
@@ -93,6 +96,12 @@ class Ui_TradeDiary(object):
         self.clearDbButton = QPushButton(self.centralwidget)
         self.clearDbButton.setObjectName(u"clearDbButton")
         self.clearDbButton.setGeometry(QRect(252, 590, 120, 25))
+        self.quantitiveAssessmentButton = QPushButton(self.centralwidget)
+        self.quantitiveAssessmentButton.setObjectName(u"quantitiveAssessmentButton")
+        self.quantitiveAssessmentButton.setGeometry(QRect(20, 622, 150, 25))
+        self.qualitativeAssessmentButton = QPushButton(self.centralwidget)
+        self.qualitativeAssessmentButton.setObjectName(u"qualitativeAssessmentButton")
+        self.qualitativeAssessmentButton.setGeometry(QRect(180, 622, 150, 25))
         TradeDiary.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(TradeDiary)
         self.menubar.setObjectName(u"menubar")
@@ -120,8 +129,11 @@ class Ui_TradeDiary(object):
         self.updatePricesButton.setText(QCoreApplication.translate("TradeDiary", u"Update", None))
         self.macroLabel.setText(QCoreApplication.translate("TradeDiary", u"\u041c\u0430\u043a\u0440\u043e:", None))
         self.macroProgressBar.setFormat(QCoreApplication.translate("TradeDiary", u"%v\u00b0", None))
+        self.macroButton.setText(QCoreApplication.translate("TradeDiary", u"\u041c\u0430\u043a\u0440\u043e", None))
         self.corrLabel.setText(QCoreApplication.translate("TradeDiary", u"\u041a\u043e\u0440\u0440:", None))
         self.correlationMatrixButton.setText(QCoreApplication.translate("TradeDiary", u"Correlation Matrix", None))
         self.clearDbButton.setText(QCoreApplication.translate("TradeDiary", u"Clear DB", None))
+        self.quantitiveAssessmentButton.setText(QCoreApplication.translate("TradeDiary", u"Quant. Assessment", None))
+        self.qualitativeAssessmentButton.setText(QCoreApplication.translate("TradeDiary", u"Qual. Assessment", None))
     # retranslateUi
 

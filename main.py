@@ -54,7 +54,8 @@ class TableModel(QtCore.QAbstractTableModel):
             'What\'s next', \
             'Notes', \
             'Chart', \
-            'Candles']
+            'Candles', \
+            'Delete']
 
     def __init__(self, data):
         super(TableModel, self).__init__()
@@ -65,9 +66,9 @@ class TableModel(QtCore.QAbstractTableModel):
             col = index.column()
             if col == 7:
                 return trade_system_name(self._data[index.row()][col])
-            if col == 12:
+            if col in (12, 13, 14):
                 return ''
-            return self._data[index.row()][col] if col != 13 else ''
+            return self._data[index.row()][col]
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if (self._data[index.row()][4] > self._data[index.row()][1]):
                 return QtGui.QBrush(QtGui.QColor(42, 106, 64))
@@ -89,6 +90,14 @@ class TableModel(QtCore.QAbstractTableModel):
 
     def columnCount(self, index):
         return len(self.header_labels)
+
+    def removeRows(self, row, count, parent=QtCore.QModelIndex()):
+        if row < 0 or row + count > len(self._data):
+            return False
+        self.beginRemoveRows(parent, row, row + count - 1)
+        del self._data[row:row + count]
+        self.endRemoveRows()
+        return True
 
 
     def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
@@ -196,6 +205,8 @@ class TradeDiary(QtWidgets.QMainWindow):
             12, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.tradeTableView.horizontalHeader().setSectionResizeMode(
             13, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.tradeTableView.horizontalHeader().setSectionResizeMode(
+            14, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.longButton.clicked.connect(self.longClicked)
         self.shortButton.clicked.connect(self.shortClicked)
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
@@ -203,11 +214,15 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.recalcBalance()
         self.setupMacro()
         self.setupCorrelation()
+        self.quantitiveAssessmentButton.clicked.connect(self.quantitiveAssessmentClicked)
+        self.qualitativeAssessmentButton.clicked.connect(self.qualitativeAssessmentClicked)
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
+        self.macroButton.clicked.connect(self.macroClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
         self.tradeTableView.setColumnWidth(13, 80)
+        self.tradeTableView.setColumnWidth(14, 70)
 
     def _rebuildChartButtons(self):
         for w in self._chartButtons:
@@ -229,6 +244,12 @@ class TradeDiary(QtWidgets.QMainWindow):
             ca_btn.clicked.connect(lambda checked=False, r=row: self.candlesClicked(r))
             self.tradeTableView.setIndexWidget(self.model.index(row, 13), ca_btn)
             self._chartButtons.append(ca_btn)
+
+            del_btn = QtWidgets.QPushButton('Delete')
+            del_btn.setFixedSize(62, 24)
+            del_btn.clicked.connect(lambda checked=False, r=row: self.deleteClicked(r))
+            self.tradeTableView.setIndexWidget(self.model.index(row, 14), del_btn)
+            self._chartButtons.append(del_btn)
 
     def _openNonModal(self, kind, row):
         """Open a chart dialog non-modally so several can be visible at once."""
@@ -402,6 +423,14 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._dialogs_set().add(dlg)
         dlg.show()
 
+    def macroClicked(self):
+        """Open the US macro overview dialog (tabbed indicator charts)."""
+        from macro_dialog import MacroDialog
+        dlg = MacroDialog(self)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
     def clearDbClicked(self):
         ret = QtWidgets.QMessageBox.question(
             self.window(), 'Clear DB',
@@ -413,9 +442,21 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.refreshCorrelation()
 
     def setupMacro(self):
-        import random
-        value = random.randint(-10, 10)
+        """Compute the macro thermometer from the cached FRED indices.
+
+        Falls back to a neutral 0 (with an explanatory note) when the data is
+        unavailable, instead of a random value. See macro_dialog.compute_macro_score.
+        """
+        from macro_dialog import compute_macro_score
+        try:
+            value, note = compute_macro_score()
+        except Exception:
+            value, note = None, 'Ошибка расчёта'
+        if value is None:
+            value = 0
         self.macroProgressBar.setValue(value)
+        self.macroProgressBar.setFormat('{:d}°'.format(value))
+        self.macroProgressBar.setToolTip('Макро температура (по FRED): {}'.format(note))
         color = self._macroColor(value)
         r, g, b = color
         text_color = QtGui.QColor(0, 0, 0) if 0.299*r + 0.587*g + 0.114*b > 160 else QtGui.QColor(255, 255, 255)
@@ -444,7 +485,56 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def load_ui(self):
         loadUi("form.ui", self)
+        self._buildLayout()
         self.resize(1600, 900)
+        self.showMaximized()
+
+    def _buildLayout(self):
+        """Place widgets in layouts so the deals table stretches with the window."""
+        central = self.centralwidget
+
+        top = QtWidgets.QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        for w in (self.equityLabel, self.equityEdit, self.equityCurrencyLabel,
+                  self.label, self.balanceEdit, self.balanceCurrencyLabel):
+            top.addWidget(w)
+        top.addStretch(1)
+        for w in (self.longButton, self.shortButton, self.recalcSlTpButton,
+                  self.dealHistoryButton, self.updatePricesButton):
+            top.addWidget(w)
+        top.addStretch(1)
+
+        bottom = QtWidgets.QVBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+
+        bottom_row1 = QtWidgets.QHBoxLayout()
+        bottom_row1.setContentsMargins(0, 0, 0, 0)
+        bottom_row1.setSpacing(8)
+        for w in (self.macroLabel, self.macroProgressBar, self.macroButton,
+                  self.corrLabel, self.corrProgressBar, self.corrCommentLabel,
+                  self.correlationMatrixButton):
+            bottom_row1.addWidget(w)
+        bottom_row1.addStretch(1)
+
+        bottom_row2 = QtWidgets.QHBoxLayout()
+        bottom_row2.setContentsMargins(0, 0, 0, 0)
+        bottom_row2.setSpacing(8)
+        for w in (self.clearDbButton, self.quantitiveAssessmentButton,
+                  self.qualitativeAssessmentButton):
+            bottom_row2.addWidget(w)
+        bottom_row2.addStretch(1)
+
+        bottom.addLayout(bottom_row1)
+        bottom.addLayout(bottom_row2)
+
+        v = QtWidgets.QVBoxLayout(central)
+        v.setContentsMargins(20, 10, 20, 10)
+        v.setSpacing(10)
+        v.addLayout(top)
+        v.addWidget(self.tradeTableView, 1)
+        v.addLayout(bottom)
 
     def read_data(self):
         DOMTree = xml.dom.minidom.parse("diary.xml")
@@ -526,6 +616,9 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def closeEvent(self,event):
         print("Close event")
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
 
         doc = xml.dom.minidom.parseString("<diary/>")
         root = doc.documentElement
@@ -603,6 +696,34 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def onTickerAdded(self, ticker, currency):
         price_history.ensure_history(ticker, currency)
+        self.refreshCorrelation()
+        self._show_advice_goat()
+
+    def _show_advice_goat(self):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+        self._goat = GoatAssistant('', self,
+                                   advice='Балансируйте лонги и шорты в портфеле',
+                                   auto_hide_ms=5000)
+        self._goat.show()
+
+    def deleteClicked(self, row):
+        if row < 0 or row >= len(self.data):
+            return
+        ticker = str(self.data[row][0] or '') or 'deal'
+        ret = QtWidgets.QMessageBox.question(
+            self.window(), 'Delete deal',
+            'Delete this deal ({} )?'.format(ticker),
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.model.removeRows(row, 1)
+        self._rebuildChartButtons()
+        self.recalcBalance()
         self.refreshCorrelation()
 
     def editClicked(self, item):
@@ -783,6 +904,20 @@ class TradeDiary(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self.window(), 'Recalc SL/TP',
                 'Nothing recalculated.' + ((' Skipped: ' + ', '.join(skipped)) if skipped else ''))
+
+    def quantitiveAssessmentClicked(self):
+        QtWidgets.QMessageBox.information(
+            self.window(), 'Quantitative Assessment',
+            'Quantitative assessment placeholder.\n'
+            'This is a regular screener, but with hints on which criteria to screen for.')
+
+    def qualitativeAssessmentClicked(self):
+        from qualitative_dialog import QualitativeAssessmentDialog
+        dlg = QualitativeAssessmentDialog(self)
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
 
     def dealHistoryClicked(self):
         """Open the Deal History window (all deals).

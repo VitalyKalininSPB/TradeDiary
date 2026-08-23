@@ -8,6 +8,7 @@ from enum import Enum
 from datetime import datetime
 from dataclasses import dataclass
 import markets
+import logo
 
 class DirectionType(Enum):
     BUY = 1
@@ -120,6 +121,8 @@ class DealDialog(QDialog):
     def __init__(self):
         super().__init__()
         loadUi("deal.ui", self)
+        self.logoLabel.setFixedSize(48, 48)
+        self.logoLabel.setVisible(True)
         self.buttonBox_2.accepted.connect(self.okPressed)
         self.buttonBox_2.rejected.connect(self.cancelPressed)
         self._tickerDebounce = QTimer(self)
@@ -185,6 +188,22 @@ class DealDialog(QDialog):
         print('Reject')
         self.reject()
 
+    def setLogo(self, ticker, market=None):
+        if not hasattr(self, 'logoLabel'):
+            return
+        if ticker:
+            if market == markets.MOEX:
+                pm = logo.moex_logo_pixmap(ticker)
+            else:
+                pm = logo.logo_pixmap(ticker)
+        else:
+            pm = QtGui.QPixmap()
+        self.logoLabel.setPixmap(
+            pm.scaled(self.logoLabel.size(),
+                      QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                      QtCore.Qt.TransformationMode.SmoothTransformation)
+            if not pm.isNull() else QtGui.QPixmap())
+
     def setCurrency(self, currency):
         self._currency = currency
         sign = markets.CURRENCY_SIGN.get(currency, 'pt')
@@ -204,8 +223,10 @@ class DealDialog(QDialog):
             return 'Future'
         ticker = self.ticketEdit.text().strip()
         if not ticker:
+            self.setLogo('', None)
             return 'Stock'
         market, currency = markets.market_currency(ticker)
+        self.setLogo(ticker, market)
         if market is not None:
             self.setCurrency(currency)
             if currency == markets.RUB:

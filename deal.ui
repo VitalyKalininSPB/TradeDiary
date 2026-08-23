@@ -95,6 +95,19 @@
     </rect>
    </property>
   </widget>
+  <widget class="QLabel" name="logoLabel">
+   <property name="geometry">
+    <rect>
+     <x>235</x>
+     <y>30</y>
+     <width>48</width>
+     <height>48</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
   <widget class="QLabel" name="openDateLabel">
    <property name="geometry">
     <rect>
