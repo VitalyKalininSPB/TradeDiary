@@ -58,9 +58,16 @@ def _cache_path(ticker, ext):
 
 
 def _render_pixmap(data):
-    """Turn raw bytes (SVG or bitmap) into a QPixmap."""
+    """Turn raw bytes (SVG or bitmap) into a QPixmap.
+
+    Uses Qt's built-in format plugins (svg/raster) via loadFromData, which is
+    more tolerant of real-world SVG files than the manual QSvgRenderer path.
+    """
     if not data:
         return None
+    pm = QPixmap()
+    if pm.loadFromData(data):
+        return pm
     if _ext_for(data) == '.svg':
         renderer = QSvgRenderer(bytes(data))
         size = renderer.defaultSize()
@@ -71,10 +78,8 @@ def _render_pixmap(data):
         painter = QPainter(pm)
         ok = renderer.render(painter)
         painter.end()
-        return pm if ok else None
-    pm = QPixmap()
-    if pm.loadFromData(data):
-        return pm
+        if ok:
+            return pm
     return None
 
 
@@ -221,11 +226,15 @@ def _moex_logo_bytes(ticker):
 
 
 def moex_logo_pixmap(ticker):
-    """Return a QPixmap logo for a MOEX ticker (Wikipedia-based), cached."""
+    """Return a QPixmap logo for a MOEX ticker (Wikipedia-based), cached.
+
+    Returns None (not the letter avatar) when no logo could be resolved, so the
+    caller can fall back to another provider. Only real logos are cached.
+    """
     ticker = (ticker or '').strip().upper()
     key = 'MOEX:' + ticker
     if not ticker:
-        return QPixmap()
+        return None
     base = _safe_name('MOEX_' + ticker)
     pm = _cache_lookup(key, base)
     if pm is not None:
@@ -243,9 +252,7 @@ def moex_logo_pixmap(ticker):
             pm = pm.scaledToHeight(
                 _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
             return _store(key, pm)
-    pm = _placeholder(ticker).scaledToHeight(
-        _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
-    return _store(key, pm)
+    return None
 
 
 def _cache_lookup(key, base):
@@ -273,12 +280,12 @@ def _cache_lookup(key, base):
 def logo_pixmap(ticker):
     """Return a QPixmap for a company logo (small), loading from cache if possible.
 
-    The result is cached in memory and on disk. A letter avatar is returned as a
-    fallback when no logo can be obtained, so the UI stays intact.
+    The result is cached in memory and on disk. Returns None when no logo could
+    be obtained, so the caller can try another provider or show a placeholder.
     """
     ticker = (ticker or '').strip().upper()
     if not ticker:
-        return QPixmap()
+        return None
 
     with _lock:
         if ticker in _cached:
@@ -316,10 +323,14 @@ def logo_pixmap(ticker):
                 _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
             return _store(ticker, pm)
 
-    # 3) Fallback avatar
-    pm = _placeholder(ticker).scaledToHeight(
-        _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
-    return _store(ticker, pm)
+    # 3) Nothing found -> signal the caller (do not cache, do not fake a logo)
+    return None
+
+
+def placeholder_pixmap(ticker, height=_TARGET_HEIGHT):
+    """A local letter avatar used only when no real logo could be resolved."""
+    return _placeholder(ticker).scaledToHeight(
+        height, Qt.TransformationMode.SmoothTransformation)
 
 
 def _store(ticker, pm):

@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
   <diary>
-    <balance value="-1453.162476511684"/>
+    <balance value="-1623.3353056096005"/>
     <deal ticker="GAZP" stockPrice="84.45" stocksAmount="100.0" openDate="21/08/2026 16:50" initPrice="84.45" takeProfit="91.55" stopLoss="80.90" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes="" currency="RUB"/>
-    <deal ticker="SBER" stockPrice="272.1" stocksAmount="100.0" openDate="22/08/2026 20:31" initPrice="272.1" takeProfit="279.20" stopLoss="268.55" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes="" currency="RUB"/>
     <deal ticker="TSLA" stockPrice="362.86" stocksAmount="4.0" openDate="22/08/2026 20:35" initPrice="362.86" takeProfit="365.00" stopLoss="361.79" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes="" currency="USD"/>
+    <deal ticker="VTBR" stockPrice="52.445" stocksAmount="10.0" openDate="23/08/2026 07:27" initPrice="52.445" takeProfit="0" stopLoss="0" tradeSystem="0" result="" closeDate="" whatsNext="" analysisNotes="" currency="RUB"/>
   </diary>

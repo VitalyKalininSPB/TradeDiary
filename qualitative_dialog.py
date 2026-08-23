@@ -3,7 +3,8 @@ from urllib.parse import quote_plus
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, QRectF, QRect, QPoint, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPainterPath, QPixmap
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QPainter, QPen,
+                           QPainterPath, QPixmap)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QWidget, QFrame, QTextEdit)
 
@@ -24,6 +25,9 @@ class GoatAssistant(QWidget):
 
     _PHASE_DONE_TEXT = 'Отлично! Ты проанализировал {ticker}'
 
+    _MAX_TEXT_W = 220
+    _BUBBLE_PAD = 16
+
     def __init__(self, ticker, parent=None, advice=None, auto_hide_ms=0):
         super().__init__(parent)
         self._src = QPixmap(GOAT_IMAGE)
@@ -39,10 +43,22 @@ class GoatAssistant(QWidget):
         target_h = 220
         self._pixmap = self._src.scaledToHeight(
             target_h, Qt.TransformationMode.SmoothTransformation)
-        bubble_w = 340
-        bubble_h = 90
-        self.setFixedSize(bubble_w + 14 + self._pixmap.width(),
-                          max(bubble_h, self._pixmap.height()))
+        self._font = QFont('Sans', 12)
+        self._font.setBold(True)
+        self._text_rect = QRect(0, 0, self._MAX_TEXT_W, 120)
+        fm = QFontMetrics(self._font)
+        bound = fm.boundingRect(
+            self._text_rect,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+            | Qt.TextFlag.TextWordWrap,
+            self._quote)
+        bubble_w = bound.width() + 2 * self._BUBBLE_PAD
+        bubble_h = bound.height() + 16
+        self._bubble_w = max(bubble_w, 160)
+        self._bubble_h = max(bubble_h, 70)
+        gap = 14
+        self.setFixedSize(self._bubble_w + gap + self._pixmap.width(),
+                          max(self._bubble_h, self._pixmap.height()))
         self.setWindowFlags(Qt.WindowType.Tool
                             | Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint)
@@ -72,11 +88,13 @@ class GoatAssistant(QWidget):
 
     def _drawBubble(self, p):
         goat_x = self.width() - self._pixmap.width()
-        rect = QRect(8, 8, goat_x - 18, 74)
+        rect = QRect(8, 8, self._bubble_w, self._bubble_h)
 
-        # Goat's mouth anchor (near its lower-left on the image).
-        mouth_y = 8 + max(8, (self._pixmap.height() * 0.55))
-        tip = QPoint(goat_x + int(self._pixmap.width() * 0.16), int(mouth_y))
+        # Mouth anchor measured on the original 677x369 image, scaled to display.
+        mouth_x = 214 * self._pixmap.width() / 677.0
+        mouth_y = 115 * self._pixmap.height() / 369.0
+        goat_y = max(6, (self.height() - self._pixmap.height()) // 2)
+        tip = QPoint(int(goat_x + mouth_x), int(goat_y + mouth_y))
 
         bubble = QPainterPath()
         bubble.addRoundedRect(rect, 16, 16)
@@ -91,11 +109,11 @@ class GoatAssistant(QWidget):
         p.setBrush(QColor(255, 236, 148))
         p.drawPath(bubble)
         p.setPen(QColor(60, 45, 5))
-        f = QFont('Sans', 12)
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(rect.adjusted(12, 6, -12, -6),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+        p.setFont(self._font)
+        p.drawText(self._text_rect.translated(8 + self._BUBBLE_PAD,
+                                              8 + 8),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+                   | Qt.TextFlag.TextWordWrap,
                    self._quote)
 
 _CHIP_CURRENT = ('color: #1e1f24; background-color: #f0c14b; border: 1px solid #ffd76e; '

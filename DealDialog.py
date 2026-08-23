@@ -192,10 +192,16 @@ class DealDialog(QDialog):
         if not hasattr(self, 'logoLabel'):
             return
         if ticker:
-            if market == markets.MOEX:
+            pm = None
+            # MOEX tickers (or unknown ones) -> Wikipedia-based real logo first.
+            if market in (None, markets.MOEX):
                 pm = logo.moex_logo_pixmap(ticker)
-            else:
+            # World / anything else -> Parqet, falling back to MOEX source too.
+            if pm is None and market != markets.MOEX:
                 pm = logo.logo_pixmap(ticker)
+            # Only show the letter avatar when no real logo was found anywhere.
+            if pm is None:
+                pm = logo.placeholder_pixmap(ticker)
         else:
             pm = QtGui.QPixmap()
         self.logoLabel.setPixmap(
