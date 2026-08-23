@@ -196,39 +196,85 @@ def _wp_file_url(lang, file):
     return None
 
 
-def _moex_logo_bytes(ticker):
-    """Resolve and download a logo image for a MOEX ticker via Wikipedia."""
-    latname, shortname = _moex_sec_names(ticker)
-    candidates = []
-    if latname:
-        candidates.append(('en', latname))
-    if shortname:
-        candidates.append(('ru', shortname))
-    for lang, term in candidates:
-        page = _wp_search_page(lang, term)
-        if not page:
-            continue
-        logo_file = _wp_logo_file(lang, page)
-        if not logo_file:
-            continue
-        url = _wp_file_url(lang, logo_file)
-        if not url:
-            continue
-        url = url.split('?', 1)[0]
-        try:
-            r = requests.get(url, headers=_UA, timeout=_FETCH_TIMEOUT)
-            r.raise_for_status()
-            if r.content:
-                return r.content
-        except Exception as e:
-            print('MOEX logo download failed for ' + ticker + ': ' + str(e))
+def _wp_website(lang, page):
+    """Extract the company website domain from the Wikipedia infobox, or None."""
+    data = _wp_api(lang, titles=page, prop='revisions', rvprop='content',
+                   rvslots='main')
+    if not data:
+        return None
+    for p in data.get('query', {}).get('pages', {}).values():
+        for rev in p.get('revisions', []):
+            txt = rev.get('slots', {}).get('main', {}).get('*', '')
+            m = re.search(r'website\s*=\s*\{\{URL\|([^|}]+)', txt)
+            if not m:
+                m = re.search(r'website\s*=\s*(www\.[^\s|}]+)', txt)
+            if m:
+                dom = m.group(1).strip()
+                if dom.startswith('http'):
+                    dom = dom.split('//')[-1]
+                dom = dom.strip('/')
+                return dom.split('/')[0] if dom else None
     return None
 
 
-def moex_logo_pixmap(ticker):
-    """Return a QPixmap logo for a MOEX ticker (Wikipedia-based), cached.
+def _google_favicon(domain):
+    """Fetch a company favicon via Google's s2 service (square), or None."""
+    try:
+        url = 'https://www.google.com/s2/favicons?sz=128&domain=' + domain
+        r = requests.get(url, headers=_UA, timeout=_FETCH_TIMEOUT)
+        r.raise_for_status()
+        if r.content:
+            return r.content
+    except Exception as e:
+        print('Favicon fetch failed for ' + domain + ': ' + str(e))
+    return None
 
-    Returns None (not the letter avatar) when no logo could be resolved, so the
+
+def _moex_logo_candidates(ticker):
+    """Ordered logo candidates (bytes) for a MOEX ticker.
+
+    Prefers the company's square site icon (favicon); falls back to the
+    Wikipedia brand logo. Each candidate resolves via the best-matching article
+    (en via LATNAME first, then ru via SHORTNAME).
+    """
+    latname, shortname = _moex_sec_names(ticker)
+    pairs = []
+    if latname:
+        pairs.append(('en', latname))
+    if shortname:
+        pairs.append(('ru', shortname))
+
+    favicons = []          # (domain, bytes) - square icons, preferred
+    wordmarks = []         # (file, bytes) - wikipedia logos, fallback
+    for lang, term in pairs:
+        page = _wp_search_page(lang, term)
+        if not page:
+            continue
+        domain = _wp_website(lang, page)
+        if domain:
+            fb = _google_favicon(domain)
+            if fb:
+                favicons.append(fb)
+        logo_file = _wp_logo_file(lang, page)
+        if logo_file:
+            url = _wp_file_url(lang, logo_file)
+            if url:
+                try:
+                    r = requests.get(url.split('?', 1)[0], headers=_UA,
+                                     timeout=_FETCH_TIMEOUT)
+                    r.raise_for_status()
+                    if r.content:
+                        wordmarks.append(r.content)
+                except Exception as e:
+                    print('MOEX logo download failed for ' + ticker + ': ' + str(e))
+    return favicons + wordmarks
+
+
+def moex_logo_pixmap(ticker):
+    """Return a QPixmap logo for a MOEX ticker, cached.
+
+    Prefers a square company icon and otherwise uses a Wikipedia brand logo.
+    Returns None (not the letter avatar) when no logo could be resolved so the
     caller can fall back to another provider. Only real logos are cached.
     """
     ticker = (ticker or '').strip().upper()
@@ -239,19 +285,21 @@ def moex_logo_pixmap(ticker):
     pm = _cache_lookup(key, base)
     if pm is not None:
         return pm
-    data = _moex_logo_bytes(ticker)
-    if data:
+    for data in _moex_logo_candidates(ticker):
+        if not data:
+            continue
+        pm = _render_pixmap(data)
+        if pm is None or pm.isNull() or min(pm.width(), pm.height()) < 24:
+            continue
         path = os.path.join(LOGO_DIR, base + _ext_for(data))
         try:
             with open(path, 'wb') as fh:
                 fh.write(data)
         except Exception as e:
             print('MOEX logo cache write failed for ' + ticker + ': ' + str(e))
-        pm = _render_pixmap(data)
-        if pm is not None and not pm.isNull():
-            pm = pm.scaledToHeight(
-                _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
-            return _store(key, pm)
+        pm = pm.scaledToHeight(
+            _TARGET_HEIGHT, Qt.TransformationMode.SmoothTransformation)
+        return _store(key, pm)
     return None
 
 

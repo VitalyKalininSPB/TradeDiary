@@ -232,7 +232,6 @@ class DealDialog(QDialog):
             self.setLogo('', None)
             return 'Stock'
         market, currency = markets.market_currency(ticker)
-        self.setLogo(ticker, market)
         if market is not None:
             self.setCurrency(currency)
             if currency == markets.RUB:
@@ -241,6 +240,7 @@ class DealDialog(QDialog):
                 price = markets.fetch_world_price(ticker)
             if price is not None:
                 self.priceEdit.setText(str(price))
+        self.setLogo(ticker, market)
         return 'Stock'
 
     def priceChanged(self):

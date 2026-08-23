@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - fallback
 
 GOAT_IMAGE = '/home/vitaly/Downloads/advice_goat.png'
 
-STAGES = ['MOP', 'KPI', 'Board of directors']
+STAGES = ['Management Operation Plan (MOP)', 'KPI', 'Board of directors']
 
 GOAT_IMAGE = '/home/vitaly/Downloads/advice_goat.png'
 
@@ -45,17 +45,17 @@ class GoatAssistant(QWidget):
             target_h, Qt.TransformationMode.SmoothTransformation)
         self._font = QFont('Sans', 12)
         self._font.setBold(True)
-        self._text_rect = QRect(0, 0, self._MAX_TEXT_W, 120)
         fm = QFontMetrics(self._font)
         bound = fm.boundingRect(
-            self._text_rect,
+            QRect(0, 0, self._MAX_TEXT_W, 10000),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
             | Qt.TextFlag.TextWordWrap,
             self._quote)
-        bubble_w = bound.width() + 2 * self._BUBBLE_PAD
-        bubble_h = bound.height() + 16
-        self._bubble_w = max(bubble_w, 160)
-        self._bubble_h = max(bubble_h, 70)
+        self._text_w = max(bound.width(), self._MAX_TEXT_W)
+        self._text_h = max(bound.height(), 1)
+        self._text_rect = QRect(0, 0, self._text_w, self._text_h)
+        self._bubble_w = max(self._text_w + 2 * self._BUBBLE_PAD, 160)
+        self._bubble_h = max(self._text_h + 2 * self._BUBBLE_PAD, 70)
         gap = 14
         self.setFixedSize(self._bubble_w + gap + self._pixmap.width(),
                           max(self._bubble_h, self._pixmap.height()))
@@ -111,7 +111,7 @@ class GoatAssistant(QWidget):
         p.setPen(QColor(60, 45, 5))
         p.setFont(self._font)
         p.drawText(self._text_rect.translated(8 + self._BUBBLE_PAD,
-                                              8 + 8),
+                                              8 + self._BUBBLE_PAD),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
                    | Qt.TextFlag.TextWordWrap,
                    self._quote)
