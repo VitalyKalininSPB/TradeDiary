@@ -189,6 +189,35 @@ class OfficeAssistant(QtWidgets.QWidget):
                    QtCore.Qt.AlignmentFlag.AlignCenter, self._quote)
 
 
+class _MacroRefreshThread(QtCore.QThread):
+    """Recompute the macro thermometer and the NASDAQ regime off the UI thread.
+
+    All data fetching happens here (background), so the main window never blocks
+    on network or FRED cache refresh. Emits the fresh values back to the UI.
+    """
+    finished_ok = QtCore.Signal(int, str, str)  # score, note, regime_name
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        from macro_dialog import compute_macro_score_cached
+        from index_dialog import _regime_cached
+        score, note = 0, 'Нет данных'
+        try:
+            score, note = compute_macro_score_cached()
+            if score is None:
+                score, note = 0, 'Нет данных'
+        except Exception:  # noqa: BLE001 - the UI must never crash on data issues
+            score, note = 0, 'Ошибка расчёта'
+        regime = 'neutral'
+        try:
+            regime = _regime_cached('NASDAQ100')
+        except Exception:  # noqa: BLE001
+            regime = 'neutral'
+        self.finished_ok.emit(score, note, regime)
+
+
 class TradeDiary(QtWidgets.QMainWindow):
     def __init__(self):
         super(TradeDiary, self).__init__()
@@ -455,19 +484,31 @@ class TradeDiary(QtWidgets.QMainWindow):
     # риск-on/off шкала [-10;+10] из FRED-индикаторов (см. compute_macro_score в
     # macro_dialog.py). Иконка быка/медведя рядом — macroRegimeLabel.
     def setupMacro(self):
-        """Compute the macro thermometer from the cached FRED indices.
+        """Render the thermometer from cached data instantly, refresh lazily.
 
-        Falls back to a neutral 0 (with an explanatory note) when the data is
-        unavailable, instead of a random value. See macro_dialog.compute_macro_score.
+        The score and the bull/bear icon are drawn from their DB caches first
+        (no network, no blocking), then a deferred recompute refreshes them if
+        they are stale. This keeps window load fast even on refresh days.
         """
-        from macro_dialog import compute_macro_score
-        try:
-            value, note = compute_macro_score()
-        except Exception:
-            value, note = None, 'Ошибка расчёта'
-        if value is None:
-            value = 0
-        self._setMacroRegime()
+        from macro_dialog import _load_score_cached
+        from index_dialog import _load_regime_cached
+
+        cached = _load_score_cached()
+        if cached is not None:
+            self._applyMacro(cached[0], cached[1])
+        else:
+            self._applyMacro(0, 'загружаются данные…')
+        self._applyRegimeIcon(_load_regime_cached('NASDAQ100'))
+        self._macroThread = _MacroRefreshThread(self)
+        self._macroThread.finished_ok.connect(self._onMacroRefreshed)
+        self._macroThread.start()
+
+    def _onMacroRefreshed(self, value, note, regime):
+        """Apply background-computed values (runs on the UI thread)."""
+        self._applyMacro(value, note)
+        self._applyRegimeIcon(regime)
+
+    def _applyMacro(self, value, note):
         self.macroProgressBar.setValue(value)
         self.macroProgressBar.setFormat('{:d}°'.format(value))
         self.macroProgressBar.setToolTip('Макро температура (по FRED): {}'.format(note))
@@ -482,16 +523,10 @@ class TradeDiary(QtWidgets.QMainWindow):
                     r, g, b)
         )
 
-    def _setMacroRegime(self):
-        """Show the bull/bear icon next to the thermometer.
-
-        Uses the same mechanism as the index charts (price vs 200-day SMA),
-        specifically for the NASDAQ 100 series, so the icon always matches the
-        NASDAQ chart. The result is cached in the DB and recomputed at most once
-        every two days, so opening the window never triggers a network fetch.
-        """
-        from index_dialog import _regime_cached, _regime_icon
-        name = _regime_cached('NASDAQ100') or None
+    def _applyRegimeIcon(self, name):
+        """Show the bull/bear icon next to the thermometer (NASDAQ regime)."""
+        from index_dialog import _regime_icon
+        name = name or None
         pm = _regime_icon(name) if name else None
         if pm is not None and not pm.isNull():
             self.macroRegimeLabel.setPixmap(pm)
@@ -654,6 +689,9 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def closeEvent(self,event):
         print("Close event")
+        t = getattr(self, '_macroThread', None)
+        if t is not None and t.isRunning():
+            t.wait(5000)
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()

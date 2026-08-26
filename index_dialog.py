@@ -256,11 +256,8 @@ class IndexDialog(QDialog):
 
         self.reloadButton = self._build_footer(root)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._load_all()
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._loader = None
+        self._load_all()
 
     def _build_footer(self, root):
         row = QHBoxLayout()
@@ -275,14 +272,23 @@ class IndexDialog(QDialog):
         root.addLayout(row)
         return reloadBtn
 
-    def _load_all(self):
-        self.reloadButton.setEnabled(False)
+    def _on_row_loaded(self, series_id, dates, values, note):
         for tab in self._widgets:
-            try:
-                dates, values = _series(tab.series_id)
-                note = '{:,} points, {}..{}'.format(
-                    len(values), dates[0].isoformat(), dates[-1].isoformat())
-            except Exception as e:  # noqa: BLE001 - surfacing fetch errors
-                dates, values, note = [], [], 'Error: {}'.format(e)
-            tab.set_data(dates, values, note)
-        self.reloadButton.setEnabled(True)
+            if tab.series_id == series_id:
+                tab.set_data(dates, values, note)
+                return
+
+    def closeEvent(self, event):
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.wait(5000)
+        super().closeEvent(event)
+
+    def _load_all(self):
+        from macro_dialog import _ChartLoaderThread
+        self.reloadButton.setEnabled(False)
+        self._loader = _ChartLoaderThread(
+            [(t.series_id, _series) for t in self._widgets], self)
+        self._loader.row_loaded.connect(self._on_row_loaded)
+        self._loader.load_done.connect(
+            lambda: self.reloadButton.setEnabled(True))
+        self._loader.start()

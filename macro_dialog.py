@@ -27,7 +27,7 @@ from matplotlib.collections import PolyCollection
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                                QWidget, QLabel, QComboBox, QApplication,
                                QMessageBox, QScrollBar)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap
 
 _BG = '#1e1f24'
@@ -286,6 +286,78 @@ def compute_macro_score():
     score = int(round(avg * 10.0))
     score = max(-10, min(10, score))
     return score, 'по {}: {}'.format(', '.join(notes), avg)
+
+
+# ---------------------------------------------------------------------------
+# Cached macro thermometer result.
+#
+# Instead of a fragile per-indicator release-day calendar, the score result is
+# cached for _SCORE_TTL_HOURS. FRED data is monthly/quarterly, so a ~24h TTL
+# refreshes roughly daily and naturally retries the next day — no need to hardcode
+# publication dates (which shift for holidays, revisions, weekday rules).
+# ---------------------------------------------------------------------------
+_SCORE_TTL_HOURS = 24
+
+
+def _score_conn():
+    conn = sqlite3.connect(_CACHE_DB)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS macro_score_cache ("
+        "id INTEGER PRIMARY KEY, score INTEGER NOT NULL, "
+        "note TEXT NOT NULL, fetched_at TEXT NOT NULL)")
+    return conn
+
+
+def _load_score_cached():
+    """Return a fresh cached (score, note), or None when stale/missing."""
+    conn = _score_conn()
+    try:
+        row = conn.execute(
+            "SELECT score, note, fetched_at FROM macro_score_cache WHERE id=1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    score, note, fetched_at = row
+    try:
+        age = datetime.datetime.now() - datetime.datetime.fromisoformat(fetched_at)
+    except ValueError:
+        return None
+    if age.total_seconds() > _SCORE_TTL_HOURS * 3600:
+        return None
+    return score, note
+
+
+def _save_score_cached(score, note):
+    conn = _score_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO macro_score_cache "
+            "(id, score, note, fetched_at) VALUES (1,?,?,?)",
+            (score, note, datetime.datetime.now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def compute_macro_score_cached():
+    """The thermometer (score, note), from cache; recomputed when stale.
+
+    On load this is a single DB read (fast, no network). The underlying FRED
+    series are themselves cached for 24h, so a recompute refetches only stale
+    series and happens at most ~once a day.
+    """
+    cached = _load_score_cached()
+    if cached is not None:
+        return cached
+    score, note = compute_macro_score()
+    if score is not None:
+        try:
+            _save_score_cached(score, note)
+        except Exception:  # noqa: BLE001 - cache write must not fail the score
+            pass
+    return score, note
 
 
 class _IndicatorTab(QWidget):
@@ -598,6 +670,31 @@ class _IndicatorTab(QWidget):
         self._redraw()
 
 
+class _ChartLoaderThread(QThread):
+    """Fetch chart series in the background, emit each row for the UI thread.
+
+    All network / FRED-cache access happens here so the dialog never blocks.
+    Emits (series_id, dates, values, note) per series, then load_done.
+    """
+    row_loaded = Signal(object, object, object, str)
+    load_done = Signal()
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self._items = items  # list of (series_id, loader_callable)
+
+    def run(self):
+        for series_id, loader in self._items:
+            try:
+                dates, values = loader(series_id)
+                note = '{:,} points, {}..{}'.format(
+                    len(values), dates[0].isoformat(), dates[-1].isoformat())
+            except Exception as e:  # noqa: BLE001 - surfacing fetch errors
+                dates, values, note = [], [], 'Error: {}'.format(e)
+            self.row_loaded.emit(series_id, dates, values, note)
+        self.load_done.emit()
+
+
 class MacroDialog(QDialog):
     """Tabs with charts for the five key US macro indicators."""
 
@@ -624,11 +721,8 @@ class MacroDialog(QDialog):
 
         self.reloadButton = self._build_footer(root)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._load_all()
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._loader = None
+        self._load_all()
 
     def _build_footer(self, root):
         row = QHBoxLayout()
@@ -643,14 +737,22 @@ class MacroDialog(QDialog):
         root.addLayout(row)
         return reloadBtn
 
+    def _on_row_loaded(self, series_id, dates, values, note):
+        for tab in self._widgets:
+            if tab.series_id == series_id:
+                tab.set_data(dates, values, note)
+                return
+
+    def closeEvent(self, event):
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.wait(5000)
+        super().closeEvent(event)
+
     def _load_all(self):
         self.reloadButton.setEnabled(False)
-        for tab in self._widgets:
-            try:
-                dates, values = _fred(tab.series_id)
-                note = '{:,} points, {}..{}'.format(
-                    len(values), dates[0].isoformat(), dates[-1].isoformat())
-            except Exception as e:  # noqa: BLE001 - surfacing fetch errors
-                dates, values, note = [], [], 'Error: {}'.format(e)
-            tab.set_data(dates, values, note)
-        self.reloadButton.setEnabled(True)
+        self._loader = _ChartLoaderThread(
+            [(t.series_id, _fred) for t in self._widgets], self)
+        self._loader.row_loaded.connect(self._on_row_loaded)
+        self._loader.load_done.connect(
+            lambda: self.reloadButton.setEnabled(True))
+        self._loader.start()
