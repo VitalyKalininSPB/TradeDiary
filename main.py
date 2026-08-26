@@ -791,11 +791,10 @@ class TradeDiary(QtWidgets.QMainWindow):
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
-        if getattr(self, '_late_cycle', False):
-            advice = self._LATE_CYCLE_GOAT_TEXT
-        else:
-            advice = 'Балансируйте лонги и шорты в портфеле'
-        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=5000)
+        if not getattr(self, '_late_cycle', False):
+            return
+        self._goat = GoatAssistant('', self, advice=self._LATE_CYCLE_GOAT_TEXT,
+                                   auto_hide_ms=5000)
         self._goat.show()
 
     def deleteClicked(self, row):

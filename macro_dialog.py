@@ -979,7 +979,32 @@ class MacroDialog(QDialog):
         color = '#ef5350' if warning else _TXT
         self._buffett_tab.set_hint(text, color)
 
+    def _show_goat(self):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+        is_late = bool(self._late_data.get(_LATE_GDPI)) \
+            and bool(self._late_data.get(_LATE_CC)) \
+            and _late_cycle(self._late_data[_LATE_GDPI][1],
+                            self._late_data[_LATE_GDPI][0],
+                            self._late_data[_LATE_CC][1],
+                            self._late_data[_LATE_CC][0])
+        if not is_late:
+            return
+        self._goat = GoatAssistant(
+            '', self,
+            advice='Инвестиции (GPDI) падают, потребкредит (CCSA) держится — '
+                   'поздний цикл: S&P 500 близок к пику. Выходите из Tech и '
+                   'Consumer Discretionary в защиту (Utilities, Consumer Staples, '
+                   'Healthcare).',
+            auto_hide_ms=5000)
+        self._goat.show()
+
     def closeEvent(self, event):
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
         if self._loader is not None and self._loader.isRunning():
             self._loader.wait(5000)
         super().closeEvent(event)
@@ -1009,3 +1034,4 @@ class MacroDialog(QDialog):
             msg = ('Инвестиции (GPDI) падают, потребкредит (CCSA) держится'
                    if is_late else '')
             self._gdp_tab.set_late_cycle(is_late, msg)
+        self._show_goat()
