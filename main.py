@@ -487,15 +487,11 @@ class TradeDiary(QtWidgets.QMainWindow):
 
         Uses the same mechanism as the index charts (price vs 200-day SMA),
         specifically for the NASDAQ 100 series, so the icon always matches the
-        NASDAQ chart. Falls back to neutral when the series is unavailable.
+        NASDAQ chart. The result is cached in the DB and recomputed at most once
+        every two days, so opening the window never triggers a network fetch.
         """
-        from index_dialog import _regime, _regime_icon, _series
-        name = None
-        try:
-            _dates, values = _series('NASDAQ100')
-            name = _regime(values)
-        except Exception:
-            name = None
+        from index_dialog import _regime_cached, _regime_icon
+        name = _regime_cached('NASDAQ100') or None
         pm = _regime_icon(name) if name else None
         if pm is not None and not pm.isNull():
             self.macroRegimeLabel.setPixmap(pm)

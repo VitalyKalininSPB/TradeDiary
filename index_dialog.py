@@ -6,6 +6,7 @@ macro_cache.db stores both the macro indicators and the two index series.
 """
 import datetime
 import os
+import sqlite3
 
 import numpy as np
 import requests
@@ -22,6 +23,7 @@ _TXT = '#dcdce0'
 _REGIME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logos')
 _SMA_WINDOW = 200
 _REGIME_BAND = 0.02  # neutral zone around the SMA before flipping to bull/bear
+_REGIME_REFRESH_DAYS = 2  # how often the cached bull/bear result is recomputed
 
 # Series entries: (id, tab title, plot label, y-label, color, ru description).
 # SP500/NASDAQ100 come from FRED; DAX is not on FRED, so it is fetched from
@@ -137,6 +139,74 @@ def _regime_icon(name):
         return None
     return pm.scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio,
                      Qt.TransformationMode.SmoothTransformation)
+
+
+_REGIME_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'macro_cache.db')
+
+
+def _regime_conn():
+    conn = sqlite3.connect(_REGIME_DB)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS macro_regime ("
+        "series_id TEXT PRIMARY KEY, regime TEXT NOT NULL, "
+        "fetched_at TEXT NOT NULL)")
+    return conn
+
+
+def _load_regime_cached(series_id):
+    """Return a fresh cached regime ('bull'/'bear'/'neutral') or None."""
+    conn = _regime_conn()
+    try:
+        row = conn.execute(
+            "SELECT regime, fetched_at FROM macro_regime WHERE series_id=?",
+            (series_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    regime, fetched_at = row
+    try:
+        age = datetime.datetime.now() - datetime.datetime.fromisoformat(fetched_at)
+    except ValueError:
+        return None
+    if age.total_seconds() > _REGIME_REFRESH_DAYS * 86400:
+        return None
+    return regime
+
+
+def _save_regime_cached(series_id, regime):
+    conn = _regime_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO macro_regime (series_id, regime, fetched_at) "
+            "VALUES (?,?,?)",
+            (series_id, regime, datetime.datetime.now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _regime_cached(series_id):
+    """Regime for a series, refreshing from price data at most every 2 days.
+
+    On window load this is a single indexed DB read (fast, no network). When the
+    cached result is older than _REGIME_REFRESH_DAYS it is recomputed from the
+    price series and stored again. Returns 'bull'/'bear'/'neutral'.
+    """
+    cached = _load_regime_cached(series_id)
+    if cached is not None:
+        return cached
+    regime = 'neutral'
+    try:
+        _dates, values = _series(series_id)
+        regime = _regime(values) or 'neutral'
+    except Exception:  # noqa: BLE001 - a failing fetch must not block the load
+        regime = 'neutral'
+    try:
+        _save_regime_cached(series_id, regime)
+    except Exception:  # noqa: BLE001 - cache write must not fail the load
+        pass
+    return regime
 
 
 def _hint_label(text):
