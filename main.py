@@ -218,6 +218,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.qualitativeAssessmentButton.clicked.connect(self.qualitativeAssessmentClicked)
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
         self.macroButton.clicked.connect(self.macroClicked)
+        self.indexButton.clicked.connect(self.indexClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
@@ -431,6 +432,14 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._dialogs_set().add(dlg)
         dlg.show()
 
+    def indexClicked(self):
+        """Open the US indices overview dialog (tabbed index charts)."""
+        from index_dialog import IndexDialog
+        dlg = IndexDialog(self)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
     def clearDbClicked(self):
         ret = QtWidgets.QMessageBox.question(
             self.window(), 'Clear DB',
@@ -513,6 +522,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row1.setContentsMargins(0, 0, 0, 0)
         bottom_row1.setSpacing(8)
         for w in (self.macroLabel, self.macroProgressBar, self.macroButton,
+                  self.indexButton,
                   self.corrLabel, self.corrProgressBar, self.corrCommentLabel,
                   self.correlationMatrixButton):
             bottom_row1.addWidget(w)
