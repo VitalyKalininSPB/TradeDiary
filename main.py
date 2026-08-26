@@ -450,6 +450,10 @@ class TradeDiary(QtWidgets.QMainWindow):
             price_history.clear_db()
             self.refreshCorrelation()
 
+    # ТЕРМИНОЛОГИЯ: «градусник» (градусник главного окна / макро температура /
+    # thermometer) в промтах и коде — это macroProgressBar + macroRegimeLabel:
+    # риск-on/off шкала [-10;+10] из FRED-индикаторов (см. compute_macro_score в
+    # macro_dialog.py). Иконка быка/медведя рядом — macroRegimeLabel.
     def setupMacro(self):
         """Compute the macro thermometer from the cached FRED indices.
 
@@ -463,6 +467,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             value, note = None, 'Ошибка расчёта'
         if value is None:
             value = 0
+        self._setMacroRegime()
         self.macroProgressBar.setValue(value)
         self.macroProgressBar.setFormat('{:d}°'.format(value))
         self.macroProgressBar.setToolTip('Макро температура (по FRED): {}'.format(note))
@@ -476,6 +481,31 @@ class TradeDiary(QtWidgets.QMainWindow):
             .format(text_color.red(), text_color.green(), text_color.blue(),
                     r, g, b)
         )
+
+    def _setMacroRegime(self):
+        """Show the bull/bear icon next to the thermometer.
+
+        Uses the same mechanism as the index charts (price vs 200-day SMA),
+        specifically for the NASDAQ 100 series, so the icon always matches the
+        NASDAQ chart. Falls back to neutral when the series is unavailable.
+        """
+        from index_dialog import _regime, _regime_icon, _series
+        name = None
+        try:
+            _dates, values = _series('NASDAQ100')
+            name = _regime(values)
+        except Exception:
+            name = None
+        pm = _regime_icon(name) if name else None
+        if pm is not None and not pm.isNull():
+            self.macroRegimeLabel.setPixmap(pm)
+            self.macroRegimeLabel.setToolTip(
+                'Режим рынка по NASDAQ 100 (цена vs 200-SMA): '
+                + ('бычий' if name == 'bull' else 'медвежий'))
+        else:
+            self.macroRegimeLabel.clear()
+            self.macroRegimeLabel.setToolTip(
+                'Режим рынка по NASDAQ 100 (цена vs 200-SMA): нейтральный')
 
     def _macroColor(self, value):
         def lerp(a, b, t):
@@ -494,6 +524,8 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def load_ui(self):
         loadUi("form.ui", self)
+        self.macroRegimeLabel = QtWidgets.QLabel()
+        self.macroRegimeLabel.setToolTip('Режим рынка (по макро температуре)')
         self._buildLayout()
         self.resize(1600, 900)
         self.showMaximized()
@@ -521,8 +553,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row1 = QtWidgets.QHBoxLayout()
         bottom_row1.setContentsMargins(0, 0, 0, 0)
         bottom_row1.setSpacing(8)
-        for w in (self.macroLabel, self.macroProgressBar, self.macroButton,
-                  self.indexButton,
+        for w in (self.macroLabel, self.macroProgressBar, self.macroRegimeLabel,
+                  self.macroButton, self.indexButton,
                   self.corrLabel, self.corrProgressBar, self.corrCommentLabel,
                   self.correlationMatrixButton):
             bottom_row1.addWidget(w)
