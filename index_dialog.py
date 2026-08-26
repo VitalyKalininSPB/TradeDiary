@@ -5,16 +5,23 @@ Reuses the FRED fetch + SQLite cache machinery from macro_dialog, so the same
 macro_cache.db stores both the macro indicators and the two index series.
 """
 import datetime
+import os
 
+import numpy as np
 import requests
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
-                               QLabel, QApplication)
+                               QLabel, QApplication, QSizePolicy)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 
 from macro_dialog import _IndicatorTab, _fred, _load_cached, _save_cached
 
 _TXT = '#dcdce0'
+
+_REGIME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logos')
+_SMA_WINDOW = 200
+_REGIME_BAND = 0.02  # neutral zone around the SMA before flipping to bull/bear
 
 # Series entries: (id, tab title, plot label, y-label, color, ru description).
 # SP500/NASDAQ100 come from FRED; DAX is not on FRED, so it is fetched from
@@ -35,6 +42,32 @@ INDICES = [
 _YAHOO_SYMBOLS = {
     'DAX': ('^GDAXI', '25y'),
 }
+
+# Static hint under the NASDAQ 100 and S&P 500 charts: which index tends to lead
+# the other at trend reversals, and by how many weeks.
+# TODO(авто): считать «кто опережает на разворотах» и среднее опережение в
+# неделях по данным (детекция локальных экстремумов + сопоставление пиков/впадин
+# двух серий), а не использовать статичный текст.
+_LEAD_SERIES = ('NASDAQ100', 'SP500')
+_LEAD_HINT = (
+    'NASDAQ 100 обычно опережает S&P 500 на разворотах вниз: вершину формирует '
+    'раньше, чем S&P, — в среднем примерно на 2–3 недели. На разворотах вверх '
+    '(дна) опережение меньше, порядка 1 недели, и часто развороты идут '
+    'синхронно.'
+)
+
+# Static hint under the DAX chart, comparing it with NASDAQ 100 and S&P 500.
+# Empirically DAX is a "follower": it lags the US indices more often than it
+# leads them, and the lead/lag is almost always within a week (often just one
+# trading day). NASDAQ 100 turns first most often (especially at tops); the
+# DAX–S&P relationship is close to synchronous.
+_DAX_HINT = (
+    'DAX — преимущественно «догоняющий»: чаще следует за американскими '
+    'индексами, чем опережает их. Опережение/запаздывание при разворотах почти '
+    'всегда в пределах недели (нередко всего 1 торговый день). Из двух рынков '
+    'раньше разворачивается NASDAQ 100 — особенно на вершинах, — а с S&P 500 '
+    'связь практически синхронная, систематического опережения нет.'
+)
 
 
 def _yahoo(series_id):
@@ -72,6 +105,54 @@ def _series(series_id):
     return _fred(series_id)
 
 
+def _regime(values):
+    """Classify an index regime from price vs its long-term SMA.
+
+    Returns 'bull', 'bear' or None (neutral / not enough data). The SMA window
+    and the neutral band are module constants so the icon does not flutter when
+    the price hovers right around the average.
+    """
+    if not values or len(values) < _SMA_WINDOW:
+        return None
+    arr = np.asarray(values, dtype=float)
+    if np.any(np.isnan(arr[-_SMA_WINDOW:])):
+        return None
+    last = arr[-1]
+    sma = arr[-_SMA_WINDOW:].mean()
+    if sma == 0:
+        return None
+    rel = last / sma - 1.0
+    if rel > _REGIME_BAND:
+        return 'bull'
+    if rel < -_REGIME_BAND:
+        return 'bear'
+    return None
+
+
+def _regime_icon(name):
+    """Load and scale the cached bull/bear PNG, or None when missing."""
+    path = os.path.join(_REGIME_DIR, name + '.png')
+    pm = QPixmap(path)
+    if pm.isNull():
+        return None
+    return pm.scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio,
+                     Qt.TransformationMode.SmoothTransformation)
+
+
+def _hint_label(text):
+    """A small muted QLabel that wraps its lines when horizontal space runs out.
+
+    Horizontal size policy is Ignored so the label takes all available width
+    (instead of stretching the window to its single-line width) and wordWrap
+    breaks the text onto several lines.
+    """
+    hint = QLabel(text)
+    hint.setWordWrap(True)
+    hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    hint.setStyleSheet('color: #6a6d78; font-size: 11px;')
+    return hint
+
+
 class IndexDialog(QDialog):
     """Tabs with charts for the main US equity indices."""
 
@@ -91,9 +172,16 @@ class IndexDialog(QDialog):
         self.tabs = QTabWidget()
         self._widgets = []
         for series_id, title, plot_label, ylabel, color, desc in INDICES:
-            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc, self)
+            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
+                                self, show_regime=True)
+            tab._regime_fn = _regime
+            tab._regime_icon = _regime_icon
             self.tabs.addTab(tab, title)
             self._widgets.append(tab)
+            if series_id in _LEAD_SERIES:
+                tab.layout().addWidget(_hint_label(_LEAD_HINT))
+            elif series_id == 'DAX':
+                tab.layout().addWidget(_hint_label(_DAX_HINT))
         root.addWidget(self.tabs, 1)
 
         self.reloadButton = self._build_footer(root)

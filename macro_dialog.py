@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                                QWidget, QLabel, QComboBox, QApplication,
                                QMessageBox, QScrollBar)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 
 _BG = '#1e1f24'
 _TXT = '#dcdce0'
@@ -291,12 +292,16 @@ class _IndicatorTab(QWidget):
     """One tab: a matplotlib chart of a single FRED indicator."""
 
     def __init__(self, series_id, plot_label, ylabel, color, description='',
-                 parent=None):
+                 parent=None, show_regime=False):
         super().__init__(parent)
         self.series_id = series_id
         self.plot_label = plot_label
         self.ylabel = ylabel
         self.color = color
+        self._show_regime = show_regime
+        self.regimeLabel = None
+        self._regime_fn = None   # (values) -> 'bull'/'bear'/None (plugged by caller)
+        self._regime_icon = None  # (name) -> QPixmap or None
 
         self._dates = []
         self._values = []
@@ -306,6 +311,10 @@ class _IndicatorTab(QWidget):
 
         bar = QHBoxLayout()
         bar.addWidget(QLabel(series_id))
+        if show_regime:
+            self.regimeLabel = QLabel('')
+            self.regimeLabel.setStyleSheet('color: {}; font-weight: bold;'.format(_TXT))
+            bar.addWidget(self.regimeLabel)
         self.noteLabel = QLabel('')
         self.noteLabel.setStyleSheet('color: {};'.format(_TXT))
         bar.addWidget(self.noteLabel, 1)
@@ -355,6 +364,24 @@ class _IndicatorTab(QWidget):
         self._values = values
         self.noteLabel.setText(note)
         self._redraw()
+
+    def _update_regime(self):
+        """Set the bull/bear icon + text using the plugged-in functions."""
+        if self._regime_fn is None:
+            return
+        name = self._regime_fn(self._values)
+        if not name:
+            self.regimeLabel.setPixmap(QPixmap())
+            self.regimeLabel.setToolTip('')
+            return
+        pm = self._regime_icon(name) if self._regime_icon else None
+        if pm is not None and not pm.isNull():
+            self.regimeLabel.setPixmap(pm)
+            self.regimeLabel.setToolTip('Bull market' if name == 'bull'
+                                        else 'Bear market')
+        else:
+            self.regimeLabel.setText('🐂 Bull' if name == 'bull'
+                                     else '🐻 Bear')
 
     def _redraw(self):
         self.fig.clear()
@@ -419,6 +446,9 @@ class _IndicatorTab(QWidget):
         cur = self._values[-1] if self._values else float('nan')
         ax.set_title('{} — latest {:.2f}'.format(self.plot_label, cur),
                      color=_TXT)
+
+        if self._show_regime and self.regimeLabel is not None:
+            self._update_regime()
 
         # Restore any interval selection after a redraw (period change etc.).
         if self._sel_a is not None and self._sel_b is not None:
