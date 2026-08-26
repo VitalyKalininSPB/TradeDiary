@@ -55,7 +55,22 @@ INDICATORS = [
                  'Michigan consumer sentiment index',
                  'Index (1966Q1 = 100)',   '#ce93d8',
                  'Уверенность американских потребителей в экономике'),
+    ('CP',       'Corporate Profits (CP)', 'Corporate Profits After Tax',
+                 'US$ bn',                 '#fff59d',
+                 'Разворот корпоративных прибылей в отчёте ВВП (BEA) происходит '
+                 'за 2–3 квартала до того, как прибыль на акцию (EPS) компаний '
+                 'S&P 500 начнёт падать. Если ВВП показывает стагнацию прибылей '
+                 'в экономике — это сигнал к будущей распродаже на рынке акций.'),
 ]
+
+# Buffett indicator = market value of US corporate equities / nominal GDP.
+# Wilshire index data was removed from FRED in 2024, so the numerator is the
+# Fed's own "Market Value of Equities Outstanding" (NCBEILQ027S, $ millions)
+# from the Integrated Macroeconomic Accounts; GDP is the quarterly nominal
+# series ($ billions). Ratio -> percent: millions / (billions*1000) * 100.
+_BUFFETT_ID = 'BUFFETT'
+_BUFFETT_CAP_ID = 'NCBEILQ027S'
+_BUFFETT_GDP_ID = 'GDP'
 
 _PERIODS = [('1Y', 365), ('5Y', 5 * 365), ('10Y', 10 * 365), ('Max', None)]
 
@@ -135,6 +150,59 @@ def _fred(series_id):
     except Exception as e:  # noqa: BLE001 - cache write must not fail the fetch
         print('Failed to cache {}: {}'.format(series_id, e))
     return dates, values
+
+
+def _load_buffett(series_id=None):
+    """Buffett indicator as (dates, values) in percent, cached like FRED series.
+
+    `series_id` is accepted for uniformity with _fred (ignored here).
+
+    Ratio = market value of US equities (NCBEILQ027S, $m) / nominal GDP ($b),
+    sampled at each market-cap observation date using the latest GDP on or
+    before it. Fresh cache returned instantly; stale/missing recomputed.
+    """
+    cached = _load_cached(_BUFFETT_ID)
+    if cached is not None:
+        return cached
+
+    cap_dates, cap_vals = _fetch_fred(_BUFFETT_CAP_ID)
+    gdp_dates, gdp_vals = _fetch_fred(_BUFFETT_GDP_ID)
+    dates, values, gdp_idx = [], [], 0
+    for d, c in zip(cap_dates, cap_vals):
+        while gdp_idx + 1 < len(gdp_dates) and gdp_dates[gdp_idx + 1] <= d:
+            gdp_idx += 1
+        if gdp_dates[gdp_idx] > d or not gdp_vals[gdp_idx]:
+            continue
+        dates.append(d)
+        values.append(c / gdp_vals[gdp_idx] / 10.0)
+    try:
+        _save_cached(_BUFFETT_ID, dates, values)
+    except Exception as e:  # noqa: BLE001 - cache write must not fail the fetch
+        print('Failed to cache {}: {}'.format(_BUFFETT_ID, e))
+    return dates, values
+
+
+def buffett_hint(ratio):
+    """Red warning text for the Buffett indicator, or '' when fairly valued.
+
+    ratio is the latest cap/GDP in percent. Returns (text, is_warning).
+    """
+    if ratio is None:
+        return '', False
+    if ratio >= 170:
+        return ('⚠️ Рынок перегрет ({:.0f}%) — акции сильно дороже экономики, '
+                'высокий риск коррекции.'.format(ratio)), True
+    if ratio >= 130:
+        return ('⚠️ Рынок перегрет ({:.0f}%) — акции дороги относительно '
+                'экономики.'.format(ratio)), True
+    if ratio >= 110:
+        return ('Рынок слегка переоценён ({:.0f}%).'.format(ratio)), False
+    if ratio >= 90:
+        return ('Рынок справедливо оценён ({:.0f}%).'.format(ratio)), False
+    if ratio >= 75:
+        return ('⚠️ Рынок близок к недооценке ({:.0f}%).'.format(ratio)), True
+    return ('⚠️ Рынок недооценен ({:.0f}%) — акции дёшевы относительно '
+            'экономики.'.format(ratio)), True
 
 
 def _fetch_fred(series_id):
@@ -253,6 +321,83 @@ def _at_days_ago(dates, values, days_ago):
     return values[i] if 0 <= i < len(values) else None
 
 
+# Market-cycle phases (in the real-economy sense, driven by real GDP): each is a
+# (ru name, en name) pair shown in the GDP tab's phase label.
+_PHASE_EARLY = ('Ранний рост', 'Early Growth')
+_PHASE_MATURE = ('Спелость', 'Maturity')
+_PHASE_DECLINE = ('Закат', 'Decline')
+_PHASE_RECESSION = ('Рецессия', 'Recession')
+
+
+def _gdp_phase(dates, values):
+    """Classify the market cycle phase from real GDP YoY growth + acceleration.
+
+    Returns a (ru, en) name pair, or None when there is not enough data. Uses the
+    YoY growth rate g and its acceleration (change in YoY over the last ~3m):
+
+      * g <= 0             -> Recession (real GDP contracting YoY),
+      * g < ~trend, acc>0  -> Early Growth (recovering from a trough, below trend),
+      * g > ~trend, acc<0  -> Decline (still positive but decelerating / cooling),
+      * otherwise          -> Maturity (solid growth around the trend).
+    """
+    if not dates or len(values) < 2:
+        return None
+    v = values[-1]
+    vy = _at_days_ago(dates, values, _YOY_DAYS)
+    vp = _at_days_ago(dates, values, _MOMENTUM_DAYS)
+    vyp = _at_days_ago(dates, values, _YOY_DAYS + _MOMENTUM_DAYS)
+    if not all((vy, vp, vyp)) or 0 in (vy, vp, vyp):
+        return None
+    g = (v / vy - 1.0) * 100.0
+    gp = (vp / vyp - 1.0) * 100.0
+    accel = g - gp
+
+    if g <= 0.0:
+        return _PHASE_RECESSION
+    if g < 2.0 and accel > 0.0:
+        return _PHASE_EARLY
+    if g > 2.5 and accel < 0.0:
+        return _PHASE_DECLINE
+    return _PHASE_MATURE
+
+
+# ---------------------------------------------------------------------------
+# Late-cycle detection: Gross Private Domestic Investment (GPDI) starts falling
+# while consumer credit (CCSA) still holds -> late cycle, a sign the S&P 500 may
+# be close to a top. Used by the GDP tab label and the advice goat.
+# ---------------------------------------------------------------------------
+_LATE_GDPI = 'GPDI'   # Real Gross Private Domestic Investment (chained bn$)
+_LATE_CC = 'CCSA'     # Real Consumer Credit Outstanding (chained bn$)
+
+
+def _late_cycle(values_gdpi, dates_gdpi, values_cc, dates_cc):
+    """True when GPDI is falling over the last ~3m while consumer credit holds."""
+    if not values_gdpi or not values_cc:
+        return False
+    g_mom = _at_days_ago(dates_gdpi, values_gdpi, _MOMENTUM_DAYS)
+    c_mom = _at_days_ago(dates_cc, values_cc, _MOMENTUM_DAYS)
+    if g_mom is None or c_mom is None:
+        return False
+    return values_gdpi[-1] < g_mom and values_cc[-1] >= c_mom
+
+
+def late_cycle_signal():
+    """Fetch GPDI + consumer credit (cached) and classify the cycle stage.
+
+    Returns (is_late, message). Runs network/cache access, so call it only from
+    a background thread (never the UI thread).
+    """
+    try:
+        dg, vg = _fred(_LATE_GDPI)
+        dc, vc = _fred(_LATE_CC)
+    except Exception as e:  # noqa: BLE001 - a failing fetch must not kill the load
+        return False, 'нет данных по компонентам ВВП'
+    if _late_cycle(vg, dg, vc, dc):
+        return True, ('Инвестиции (GPDI) падают, потребкредит (CCSA) держится — '
+                      'поздний цикл')
+    return False, ''
+
+
 def compute_macro_score():
     """Compute the macro thermometer value in [-10, 10] from cached FRED data.
 
@@ -364,16 +509,22 @@ class _IndicatorTab(QWidget):
     """One tab: a matplotlib chart of a single FRED indicator."""
 
     def __init__(self, series_id, plot_label, ylabel, color, description='',
-                 parent=None, show_regime=False):
+                 parent=None, show_regime=False, show_phase=False,
+                 show_late_cycle=False):
         super().__init__(parent)
         self.series_id = series_id
         self.plot_label = plot_label
         self.ylabel = ylabel
         self.color = color
         self._show_regime = show_regime
+        self._show_phase = show_phase
+        self._show_late_cycle = show_late_cycle
         self.regimeLabel = None
+        self.phaseLabel = None
+        self.lateCycleLabel = None
         self._regime_fn = None   # (values) -> 'bull'/'bear'/None (plugged by caller)
         self._regime_icon = None  # (name) -> QPixmap or None
+        self._phase_fn = None    # (dates, values) -> (ru, en) or None
 
         self._dates = []
         self._values = []
@@ -415,6 +566,22 @@ class _IndicatorTab(QWidget):
         root.addWidget(self.scroll)
         self.scroll.valueChanged.connect(self._on_scrollbar)
 
+        self.hintLabel = QLabel('')
+        self.hintLabel.setWordWrap(True)
+        self.hintLabel.hide()
+        root.addWidget(self.hintLabel)
+
+        if show_phase:
+            self.phaseLabel = QLabel('')
+            self.phaseLabel.setStyleSheet('color: #ffd54f; font-weight: bold;')
+            root.addWidget(self.phaseLabel)
+
+        if show_late_cycle:
+            self.lateCycleLabel = QLabel('')
+            self.lateCycleLabel.setWordWrap(True)
+            self.lateCycleLabel.setStyleSheet('color: #ef9a9a; font-weight: bold;')
+            root.addWidget(self.lateCycleLabel)
+
         # Selection state: interval in date-number coords + the highlight band.
         self._sel_a = None
         self._sel_b = None
@@ -436,6 +603,17 @@ class _IndicatorTab(QWidget):
         self._values = values
         self.noteLabel.setText(note)
         self._redraw()
+
+    def set_hint(self, text, color=_TXT):
+        """Show a per-tab warning/status hint below the chart (hidden when empty)."""
+        if text:
+            self.hintLabel.setText(text)
+            self.hintLabel.setStyleSheet(
+                'color: {}; font-weight: bold; padding-top: 4px;'.format(color))
+            self.hintLabel.show()
+        else:
+            self.hintLabel.setText('')
+            self.hintLabel.hide()
 
     def _update_regime(self):
         """Set the bull/bear icon + text using the plugged-in functions."""
@@ -522,6 +700,9 @@ class _IndicatorTab(QWidget):
         if self._show_regime and self.regimeLabel is not None:
             self._update_regime()
 
+        if self._show_phase and self.phaseLabel is not None:
+            self._update_phase()
+
         # Restore any interval selection after a redraw (period change etc.).
         if self._sel_a is not None and self._sel_b is not None:
             self._band = ax.axvspan(
@@ -532,6 +713,33 @@ class _IndicatorTab(QWidget):
         self.fig.tight_layout()
         self.canvas.draw()
         self._sync_scrollbar()
+
+    def set_late_cycle(self, is_late, message):
+        """Reflect the late-cycle warning (from the dialog's background load)."""
+        if not self._show_late_cycle or self.lateCycleLabel is None:
+            return
+        if is_late:
+            self.lateCycleLabel.setText(
+                '⚠ Поздний цикл: {}'.format(message))
+            self.lateCycleLabel.setToolTip(
+                'Инвестиции падают, а потребкредит держится — экономика в позднем '
+                'цикле. S&P 500 может вскоре показать пик.')
+        else:
+            self.lateCycleLabel.setText('')
+            self.lateCycleLabel.setToolTip('')
+
+    def _update_phase(self):
+        """Set the market-cycle phase label using the plugged-in function."""
+        if self._phase_fn is None:
+            return
+        res = self._phase_fn(self._dates, self._values)
+        if not res:
+            self.phaseLabel.setText('')
+            return
+        ru, en = res
+        self.phaseLabel.setText('Фаза рынка: {} ({})'.format(ru, en))
+        self.phaseLabel.setToolTip(
+            'Фаза рыночного цикла по росту реального ВВП (GDPC1)')
 
     # ------------------------------------------------------------------ aside
     def _sync_scrollbar(self):
@@ -713,10 +921,27 @@ class MacroDialog(QDialog):
 
         self.tabs = QTabWidget()
         self._widgets = []
+        self._gdp_tab = None
         for series_id, title, plot_label, ylabel, color, desc in INDICATORS:
-            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc, self)
+            is_gdp = (series_id == 'GDPC1')
+            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
+                                self, show_phase=is_gdp,
+                                show_late_cycle=is_gdp)
+            if is_gdp:
+                tab._phase_fn = _gdp_phase
+                self._gdp_tab = tab
             self.tabs.addTab(tab, title)
             self._widgets.append(tab)
+
+        buffett = _IndicatorTab(
+            _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
+            'Соотношение капитализации американского рынка к ВВП', self)
+        buffett.descLabel.setText(
+            'Индикатор Баффета — капитализация американского рынка к ВВП: '
+            '<100% — рынок дешевле экономики, >100% — дороже.')
+        self.tabs.addTab(buffett, 'Buffett Indicator')
+        self._widgets.append(buffett)
+        self._buffett_tab = buffett
         root.addWidget(self.tabs, 1)
 
         self.reloadButton = self._build_footer(root)
@@ -738,10 +963,21 @@ class MacroDialog(QDialog):
         return reloadBtn
 
     def _on_row_loaded(self, series_id, dates, values, note):
+        if series_id in (_LATE_GDPI, _LATE_CC):
+            self._late_data[series_id] = (dates, values)
+            return
         for tab in self._widgets:
             if tab.series_id == series_id:
                 tab.set_data(dates, values, note)
+                if series_id == _BUFFETT_ID:
+                    self._update_buffett_hint(values)
                 return
+
+    def _update_buffett_hint(self, values):
+        latest = values[-1] if values else None
+        text, warning = buffett_hint(latest)
+        color = '#ef5350' if warning else _TXT
+        self._buffett_tab.set_hint(text, color)
 
     def closeEvent(self, event):
         if self._loader is not None and self._loader.isRunning():
@@ -750,9 +986,26 @@ class MacroDialog(QDialog):
 
     def _load_all(self):
         self.reloadButton.setEnabled(False)
-        self._loader = _ChartLoaderThread(
-            [(t.series_id, _fred) for t in self._widgets], self)
+        self._late_data = {}
+        loaders = {_BUFFETT_ID: _load_buffett}
+        items = [(t.series_id, loaders.get(t.series_id, _fred))
+                 for t in self._widgets]
+        items.append((_LATE_GDPI, _fred))
+        items.append((_LATE_CC, _fred))
+        self._loader = _ChartLoaderThread(items, self)
         self._loader.row_loaded.connect(self._on_row_loaded)
-        self._loader.load_done.connect(
-            lambda: self.reloadButton.setEnabled(True))
+        self._loader.load_done.connect(self._on_load_done)
         self._loader.start()
+
+    def _on_load_done(self):
+        """Run after the background load: refresh the GDP late-cycle label."""
+        self.reloadButton.setEnabled(True)
+        if self._gdp_tab is None:
+            return
+        g = self._late_data.get(_LATE_GDPI)
+        c = self._late_data.get(_LATE_CC)
+        if g and c:
+            is_late = _late_cycle(g[1], g[0], c[1], c[0])
+            msg = ('Инвестиции (GPDI) падают, потребкредит (CCSA) держится'
+                   if is_late else '')
+            self._gdp_tab.set_late_cycle(is_late, msg)

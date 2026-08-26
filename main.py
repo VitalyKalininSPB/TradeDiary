@@ -195,13 +195,13 @@ class _MacroRefreshThread(QtCore.QThread):
     All data fetching happens here (background), so the main window never blocks
     on network or FRED cache refresh. Emits the fresh values back to the UI.
     """
-    finished_ok = QtCore.Signal(int, str, str)  # score, note, regime_name
+    finished_ok = QtCore.Signal(int, str, str, bool)  # score, note, regime, late_cycle
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
     def run(self):
-        from macro_dialog import compute_macro_score_cached
+        from macro_dialog import compute_macro_score_cached, late_cycle_signal
         from index_dialog import _regime_cached
         score, note = 0, 'Нет данных'
         try:
@@ -215,7 +215,12 @@ class _MacroRefreshThread(QtCore.QThread):
             regime = _regime_cached('NASDAQ100')
         except Exception:  # noqa: BLE001
             regime = 'neutral'
-        self.finished_ok.emit(score, note, regime)
+        late_cycle = False
+        try:
+            late_cycle = late_cycle_signal()[0]
+        except Exception:  # noqa: BLE001
+            late_cycle = False
+        self.finished_ok.emit(score, note, regime, late_cycle)
 
 
 class TradeDiary(QtWidgets.QMainWindow):
@@ -503,8 +508,9 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._macroThread.finished_ok.connect(self._onMacroRefreshed)
         self._macroThread.start()
 
-    def _onMacroRefreshed(self, value, note, regime):
+    def _onMacroRefreshed(self, value, note, regime, late_cycle):
         """Apply background-computed values (runs on the UI thread)."""
+        self._late_cycle = late_cycle
         self._applyMacro(value, note)
         self._applyRegimeIcon(regime)
 
@@ -775,14 +781,21 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.refreshCorrelation()
         self._show_advice_goat()
 
+    _LATE_CYCLE_GOAT_TEXT = (
+        'Инвестиции (GPDI) падают, а потребкредит держится — поздний цикл: '
+        'S&P 500 близок к пику. Выходите из Tech и Consumer Discretionary, '
+        'перекладывайтесь в защиту (Utilities, Consumer Staples, Healthcare).')
+
     def _show_advice_goat(self):
         from qualitative_dialog import GoatAssistant
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
-        self._goat = GoatAssistant('', self,
-                                   advice='Балансируйте лонги и шорты в портфеле',
-                                   auto_hide_ms=5000)
+        if getattr(self, '_late_cycle', False):
+            advice = self._LATE_CYCLE_GOAT_TEXT
+        else:
+            advice = 'Балансируйте лонги и шорты в портфеле'
+        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=5000)
         self._goat.show()
 
     def deleteClicked(self, row):

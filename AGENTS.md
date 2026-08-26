@@ -63,6 +63,18 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   (см. `compute_macro_score` в macro_dialog.py). Плюс рядом иконка быка/медведя.
 - **Режим рынка** = иконка быка/медведя по «цена vs 200-дневная SMA» (`_regime` в
   index_dialog.py). На главном окне считается по NASDAQ100.
+- **«Коза»** = помощник `GoatAssistant` в qualitative_dialog.py (Clippy-аналог с
+  пузырём-советом). На главном окне показывается через `_show_advice_goat()` в
+  main.py при добавлении сделки. Совет может быть динамическим (см. поздний цикл).
+- **Фаза рынка (GDP)** = `_gdp_phase` в macro_dialog.py: классификация цикла по
+  росту реального ВВП (GDPC1) — Ранний рост / Спелость / Закат / Рецессия
+  (с англ. названиями). Выводится в QLabel внизу таба GDP в MacroDialog.
+- **Поздний цикл (late cycle)** = `_late_cycle`/`late_cycle_signal` в macro_dialog.py:
+  GPDI (Gross Private Domestic Investment) падает, а потребкредит CCSA держится →
+  экономика в позднем цикле, S&P 500 близок к пику. Сигнал считается в фоне в
+  `_MacroRefreshThread` (main.py), хранится в `self._late_cycle`, при активации коза
+  советует переложиться из Tech/Consumer Discretionary в защиту (Utilities,
+  Consumer Staples, Healthcare). В табе GDP это показывается красным QLabel.
 
 ## Карта модулей
 
