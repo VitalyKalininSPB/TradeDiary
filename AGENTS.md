@@ -11,7 +11,7 @@ source /home/vitaly/Finance/TradeDiary/.qtcreator/Python_3_12_3venv/bin/activate
 bash run.sh            # = python main.py
 
 # Быстрая проверка синтаксиса и headless-запуск диалогов:
-python -m py_compile main.py macro_dialog.py index_dialog.py pivots.py
+python -m py_compile main.py macro_dialog.py index_dialog.py pivots.py yield_curve.py
 QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без окна
 ```
 
@@ -37,7 +37,8 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   на каждую серию и `load_done`. Используется в `MacroDialog` и `IndexDialog`
   (`_on_row_loaded` находит таб по `series_id` и зовёт `tab.set_data`).
 - **`_MacroRefreshThread(QThread)` в `main.py`** — для термометра главного окна.
-  Эмитит `finished_ok(score, note, regime)` → `_applyMacro`/`_applyRegimeIcon`.
+  Эмитит `finished_ok(score, note, regime, late_cycle)` → `_onMacroRefreshed`
+  (слот сохраняет `self._late_cycle`, зовёт `_applyMacro`/`_applyRegimeIcon`).
   Первичная отрисовка — из DB-кэшей (`_load_score_cached`, `_load_regime_cached`),
   потом фоновый пересчёт.
 

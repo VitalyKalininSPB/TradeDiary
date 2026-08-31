@@ -23,6 +23,7 @@ from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 import requests
 
 from pivots import pivot_indices
+from yield_curve import YIELD_CURVE_SERIES, _YieldCurveTab
 
 from matplotlib.collections import PolyCollection
 
@@ -1050,6 +1051,11 @@ class MacroDialog(QDialog):
         self.tabs.addTab(buffett, 'Buffett Indicator')
         self._widgets.append(buffett)
         self._buffett_tab = buffett
+
+        # Yield-curve tab at fixed position 3: term structure (3M-30Y) with
+        # historical snapshots, so steepening/flattening/inversion is visible.
+        self._yield_tab = _YieldCurveTab(self)
+        self.tabs.insertTab(3, self._yield_tab, 'Yield Curve')
         root.addWidget(self.tabs, 1)
 
         self.reloadButton = self._build_footer(root)
@@ -1073,6 +1079,9 @@ class MacroDialog(QDialog):
     def _on_row_loaded(self, series_id, dates, values, note):
         if series_id in (_LATE_GDPI, _LATE_CC):
             self._late_data[series_id] = (dates, values)
+            return
+        if series_id in self._yield_tab.series_ids:
+            self._yield_tab.set_series(series_id, dates, values)
             return
         for tab in self._widgets:
             if tab.series_id == series_id:
@@ -1123,6 +1132,7 @@ class MacroDialog(QDialog):
         loaders = {_BUFFETT_ID: _load_buffett}
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
+        items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
         self._loader = _ChartLoaderThread(items, self)
