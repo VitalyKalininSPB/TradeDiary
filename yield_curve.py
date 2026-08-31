@@ -72,6 +72,10 @@ _REAL_PIVOT_RECENCY_DAYS = 120   # a real-rate turn counts if formed recently
 _NTFS_HIGH_THRESHOLD = 0.50      # NTFS must be above +0.50%
 _SPREAD_SETTLE_DAYS = 45         # base spread must stay positive this long
 
+# Curve-comparison thresholds (current curve vs a year ago), in percent.
+_CURVE_SHIFT_TOL = 0.25          # parallel shift up/down
+_CURVE_SLOPE_TOL = 0.25          # steepening / flattening
+
 # Pivot parameters shared with the real-rate tab.
 _PIVOT_KWARGS = dict(smooth_days=90, range_frac=0.25,
                      min_gap_days=120, local_days=730)
@@ -345,6 +349,54 @@ class _YieldCurveTab(QWidget):
         self.statusLabel.setText('\n'.join(lines))
         self.statusLabel.setStyleSheet(
             'color: {}; font-weight: bold;'.format(color))
+
+    def curve_comparison_message(self):
+        """Short goat text comparing the current curve with a year ago.
+
+        Detects a parallel shift (up/down) and a slope change (steepening /
+        flattening) between today's snapshot and the one ~1 year back. Returns
+        '' when the change is below the thresholds or data is missing, so the
+        goat only speaks when something meaningful is visible.
+        """
+        now = self._snapshot(0)
+        year_ago = self._snapshot(365)
+        if len(now[0]) < 5 or len(year_ago[0]) < 5:
+            return ''
+
+        def curve(days_ago):
+            xs, ys = self._snapshot(days_ago)
+            return dict(zip(xs, ys))
+
+        c_now, c_year = curve(0), curve(365)
+        avg_now = sum(c_now.values()) / len(c_now)
+        avg_year = sum(c_year.values()) / len(c_year)
+        shift = avg_now - avg_year
+
+        def slope(c):
+            return (c.get(10.0, 0.0) - c.get(0.25, 0.0)) if (10.0 in c
+                                                              and 0.25 in c) \
+                else None
+        s_now, s_year = slope(c_now), slope(c_year)
+        slope_delta = (s_now - s_year) if (s_now is not None
+                                           and s_year is not None) else 0.0
+
+        parts = []
+        if shift > _CURVE_SHIFT_TOL:
+            parts.append('Кривая за год ушла вверх — ставки выросли по всем '
+                         'срокам, деньги дороже, ФРС ужесточила политику. '
+                         'Обычно это давит на S&P 500.')
+        elif shift < -_CURVE_SHIFT_TOL:
+            parts.append('Кривая за год ушла вниз — ФРС заливает рынок '
+                         'ликвидностью, деньги дешевеют. Плюс для S&P 500.')
+        if slope_delta > _CURVE_SLOPE_TOL:
+            parts.append('Кривая стала круче: дальний конец уходит выше '
+                         'ближнего — выход из инверсии, нормализация. '
+                         'Подтверждает BUY-маркеры перегиба.')
+        elif slope_delta < -_CURVE_SLOPE_TOL:
+            parts.append('Кривая уплощается: короткие ставки растут быстрее '
+                         'длинных — реальная ставка скоро поползёт вверх, '
+                         'риск для S&P 500.')
+        return ' '.join(parts)
 
     def _redraw(self):
         self.fig.clear()

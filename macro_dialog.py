@@ -838,6 +838,52 @@ class _IndicatorTab(QWidget):
         self.phaseLabel.setToolTip(
             'Фаза рыночного цикла по росту реального ВВП (GDPC1)')
 
+    def real_rate_advice(self):
+        """Goat text for the Cleveland ex-ante real-rate tab, or ''.
+
+        Four regimes, matching the pivot markers on this tab:
+          * fresh local peak in the positive zone turning down -> STRONG BUY,
+          * below zero but rising toward it -> STRONG SELL,
+          * deep negative -> cheap-money era (supportive),
+          * above ~1.50% -> heavy, expensive-money environment.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        last_date = self._dates[-1]
+
+        piv = pivot_indices(self._values, self._dates, **self._pivot_kwargs)
+        last_pivot = None
+        if piv:
+            idx, sign = piv[-1]
+            if (last_date - self._dates[idx]).days <= 120:
+                last_pivot = (self._values[idx], sign)
+
+        if last_pivot and last_pivot[1] == -1 and last_pivot[0] > 0.0:
+            return ('Реальная ставка чертит локальный пик в плюсе и '
+                    'разворачивается вниз — ФРС готовится к снижению ставок '
+                    '(Pivot). Давление на рынок исчезает: STRONG BUY для '
+                    'S&P 500.')
+
+        if v < 0.0:
+            mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+            if mo is not None and v > mo:
+                return ('Реальная ставка разворачивается вверх из минуса к '
+                        'нулю — ФРС жёстко поднимает номинальные ставки. '
+                        'Деньги дорожают, Big Tech падает: STRONG SELL для '
+                        'S&P 500.')
+            return ('Реальная ставка в глубоком минусе — деньги '
+                    'обесцениваются, сидеть в кэше значит нести убытки. '
+                    'Эпоха дешёвых денег: мощные циклы роста S&P 500 '
+                    '(как в 2020–2021).')
+
+        if v >= 1.50:
+            return ('Реальная ставка выше 1.50% — деньги очень дорогие. '
+                    'Компании сворачивают buyback и капзатраты, S&P 500 '
+                    'стагнирует или падает.')
+
+        return ''
+
     # ------------------------------------------------------------------ aside
     def _sync_scrollbar(self):
         if self._data_x0 is None:
@@ -1067,6 +1113,7 @@ class MacroDialog(QDialog):
         # is visible.
         self._yield_tab = _YieldCurveTab(self)
         self.tabs.insertTab(2, self._yield_tab, 'Yield Curve')
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
         self.reloadButton = self._build_footer(root)
@@ -1112,27 +1159,41 @@ class MacroDialog(QDialog):
         color = '#ef5350' if warning else _TXT
         self._buffett_tab.set_hint(text, color)
 
-    def _show_goat(self):
+    def _show_goat(self, advice):
+        """Show the goat with `advice` (long enough to read), or hide it."""
         from qualitative_dialog import GoatAssistant
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
-        is_late = bool(self._late_data.get(_LATE_GDPI)) \
-            and bool(self._late_data.get(_LATE_CC)) \
-            and _late_cycle(self._late_data[_LATE_GDPI][1],
-                            self._late_data[_LATE_GDPI][0],
-                            self._late_data[_LATE_CC][1],
-                            self._late_data[_LATE_CC][0])
-        if not is_late:
+            self._goat = None
+        if not advice:
             return
-        self._goat = GoatAssistant(
-            '', self,
-            advice='Инвестиции (GPDI) падают, потребкредит (CCSA) держится — '
-                   'поздний цикл: S&P 500 близок к пику. Выходите из Tech и '
-                   'Consumer Discretionary в защиту (Utilities, Consumer Staples, '
-                   'Healthcare).',
-            auto_hide_ms=5000)
+        self._goat = GoatAssistant('', self, advice=advice,
+                                   auto_hide_ms=20000)
         self._goat.show()
+
+    def _on_tab_changed(self, index):
+        """The goat speaks only about the tab the user just switched to.
+
+        On the Yield Curve tab it explains the current curve vs a year ago; on
+        the GDP tab it warns about a late cycle when detected. Switching away
+        hides the hint so it never lingers over another chart.
+        """
+        widget = self.tabs.widget(index)
+        advice = None
+        if widget is self._yield_tab:
+            advice = self._yield_tab.curve_comparison_message()
+        elif widget is self._realrate_tab:
+            advice = self._realrate_tab.real_rate_advice()
+        elif widget is self._gdp_tab:
+            g = self._late_data.get(_LATE_GDPI)
+            c = self._late_data.get(_LATE_CC)
+            if g and c and _late_cycle(g[1], g[0], c[1], c[0]):
+                advice = ('Инвестиции (GPDI) падают, потребкредит (CCSA) '
+                          'держится — поздний цикл: S&P 500 близок к пику. '
+                          'Выходите из Tech и Consumer Discretionary в защиту '
+                          '(Utilities, Consumer Staples, Healthcare).')
+        self._show_goat(advice)
 
     def closeEvent(self, event):
         if getattr(self, '_goat', None) is not None:
@@ -1169,4 +1230,4 @@ class MacroDialog(QDialog):
             msg = ('Инвестиции (GPDI) падают, потребкредит (CCSA) держится'
                    if is_late else '')
             self._gdp_tab.set_late_cycle(is_late, msg)
-        self._show_goat()
+        # The goat speaks on tab switches (see _on_tab_changed), not on load.
