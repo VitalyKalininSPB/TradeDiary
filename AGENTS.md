@@ -11,7 +11,7 @@ source /home/vitaly/Finance/TradeDiary/.qtcreator/Python_3_12_3venv/bin/activate
 bash run.sh            # = python main.py
 
 # Быстрая проверка синтаксиса и headless-запуск диалогов:
-python -m py_compile main.py macro_dialog.py index_dialog.py
+python -m py_compile main.py macro_dialog.py index_dialog.py pivots.py
 QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без окна
 ```
 
@@ -75,6 +75,17 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   `_MacroRefreshThread` (main.py), хранится в `self._late_cycle`, при активации коза
   советует переложиться из Tech/Consumer Discretionary в защиту (Utilities,
   Consumer Staples, Healthcare). В табе GDP это показывается красным QLabel.
+- **Точки перегиба** = `pivot_indices` в pivots.py: значимые развороты тренда
+  (сглаживание + смена знака наклона + локальный порог). Возвращает `(index, sign)`:
+  `sign=+1` — впадина (ставка начала расти → **SELL S&P, красный**),
+  `sign=-1` — пик (ставка начала падать → **BUY S&P, зелёный**).
+  В MacroDialog включаются чекбоксом «Точки перегиба» (по умолчанию активен на
+  табе Real Interest Rate (Ex-Ante)).
+- **Real Interest Rate (Ex-Ante)** = ряд FRED `REAINTRATREARAT10Y` — ожидаемая
+  (ex-ante) реальная процентная ставка Кливлендского ФРС (горизонт 10 лет):
+  номинальные доходности минус модельная ожидаемая инфляция, без ценовых шоков
+  сырья и краткосрочной паники трейдеров. Это сигнальный таб Buy/Sell S&P по
+  точкам перегиба; имеет `explainLabel` с пояснением.
 
 ## Карта модулей
 
@@ -83,7 +94,15 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   `diary.xml`; термометры макро и корреляции; риск-модель `RISK_BY_CORR`; обработчики кнопок.
 - `macro_dialog.py`: `compute_macro_score` (весовой `_SCORERS`, `math.tanh`, `_MOMENTUM_DAYS=90`,
   `_YOY_DAYS=365`), `compute_macro_score_cached`, `_IndicatorTab` (общий виджет графика —
-  с опцией `show_regime`), `MacroDialog`, `_ChartLoaderThread`.
+  с опцией `show_regime`, чекбоксом «Точки перегиба» и `explainLabel`),
+  `MacroDialog`, `_ChartLoaderThread`.
+- `pivots.py`: **чистый математический модуль** (без Qt/matplotlib, только numpy) — поиск
+  значимых точек перегиба тренда `pivot_indices(values, dates, window_frac, range_frac,
+  min_gap_days, local_days)`. Возвращает `(index, sign)` (sign: +1 впадина→SELL, -1 пик→BUY).
+  Порог — от **локального** размаха (trailing `local_days`), поэтому находит 4–8-месячные
+  циклы даже на фоне большого секулярного тренда. Используется в `_IndicatorTab._redraw`
+  (macro_dialog.py); любой другой график может импортировать и рисовать маркеры по тем же
+  индексам.
 - `index_dialog.py`: `_regime`/`_regime_icon`/`_regime_cached`, `IndexDialog` (NAS100/SP500/DAX).
   Источники: FRED или Yahoo (DAX). Есть текстовые подсказки про опережение NASDAQ.
 - `price_history.py`: бэкфилл истории, корреляция.

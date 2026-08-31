@@ -22,11 +22,13 @@ from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 
 import requests
 
+from pivots import pivot_indices
+
 from matplotlib.collections import PolyCollection
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                                QWidget, QLabel, QComboBox, QApplication,
-                               QMessageBox, QScrollBar)
+                               QMessageBox, QScrollBar, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap
 
@@ -72,6 +74,12 @@ _BUFFETT_ID = 'BUFFETT'
 _BUFFETT_CAP_ID = 'NCBEILQ027S'
 _BUFFETT_GDP_ID = 'GDP'
 
+# Cleveland Fed ex-ante (expected) real interest rate, 10-year horizon. A
+# model-based real rate (nominal yields minus model-implied expected inflation,
+# excluding commodity-price noise and short-term trader panic), published on
+# FRED as a plain series. Its turning points are the Buy/Sell S&P signal tab.
+_REAL_RATE_ID = 'REAINTRATREARAT10Y'
+
 _PERIODS = [('1Y', 365), ('5Y', 5 * 365), ('10Y', 10 * 365), ('Max', None)]
 
 # Data-unit -> scrollbar-integer scaling (QScrollBar is int-only).
@@ -113,9 +121,10 @@ def _load_cached(series_id):
     if age.total_seconds() > CACHE_TTL_HOURS * 3600:
         return None
     try:
-        dates = [datetime.date.fromisoformat(d) for d in data_json['dates']]
-        values = data_json['values']
-    except (KeyError, TypeError, ValueError):
+        data = json.loads(data_json)
+        dates = [datetime.date.fromisoformat(d) for d in data['dates']]
+        values = data['values']
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     return dates, values
 
@@ -510,7 +519,8 @@ class _IndicatorTab(QWidget):
 
     def __init__(self, series_id, plot_label, ylabel, color, description='',
                  parent=None, show_regime=False, show_phase=False,
-                 show_late_cycle=False):
+                 show_late_cycle=False, show_pivots=False,
+                 pivot_kwargs=None, explain=''):
         super().__init__(parent)
         self.series_id = series_id
         self.plot_label = plot_label
@@ -519,6 +529,9 @@ class _IndicatorTab(QWidget):
         self._show_regime = show_regime
         self._show_phase = show_phase
         self._show_late_cycle = show_late_cycle
+        self._show_pivots = show_pivots
+        self._pivot_kwargs = pivot_kwargs or {}
+        self._explain = explain
         self.regimeLabel = None
         self.phaseLabel = None
         self.lateCycleLabel = None
@@ -541,6 +554,14 @@ class _IndicatorTab(QWidget):
         self.noteLabel = QLabel('')
         self.noteLabel.setStyleSheet('color: {};'.format(_TXT))
         bar.addWidget(self.noteLabel, 1)
+        self.pivotCheck = QCheckBox('Точки перегиба')
+        self.pivotCheck.setChecked(show_pivots)
+        self.pivotCheck.setToolTip(
+            'Красный = SELL S&P (реальная ставка начала расти), '
+            'зелёный = BUY S&P (реальная ставка начала падать)')
+        self.pivotCheck.toggled.connect(self._on_pivot_toggled)
+        bar.addWidget(self.pivotCheck)
+        self._pivot_artists = []
         bar.addWidget(QLabel('Period:'))
         self.periodCombo = QComboBox()
         for name, _days in _PERIODS:
@@ -581,6 +602,13 @@ class _IndicatorTab(QWidget):
             self.lateCycleLabel.setWordWrap(True)
             self.lateCycleLabel.setStyleSheet('color: #ef9a9a; font-weight: bold;')
             root.addWidget(self.lateCycleLabel)
+
+        if explain:
+            self.explainLabel = QLabel(explain)
+            self.explainLabel.setWordWrap(True)
+            self.explainLabel.setStyleSheet(
+                'color: #6a6d78; font-size: 11px; padding-top: 4px;')
+            root.addWidget(self.explainLabel)
 
         # Selection state: interval in date-number coords + the highlight band.
         self._sel_a = None
@@ -634,6 +662,10 @@ class _IndicatorTab(QWidget):
                                      else '🐻 Bear')
 
     def _redraw(self):
+        old_xlim = None
+        ax_old = self._axis()
+        if ax_old is not None and ax_old.lines:
+            old_xlim = ax_old.get_xlim()
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.set_facecolor(_BG)
@@ -647,21 +679,12 @@ class _IndicatorTab(QWidget):
             self.canvas.draw()
             return
 
-        days = _PERIODS[self.periodCombo.currentIndex()][1]
-        if days is not None:
-            cutoff = datetime.date.today() - datetime.timedelta(days=days)
-            idx = [i for i, d in enumerate(self._dates) if d >= cutoff]
-            if idx:
-                dates = [self._dates[i] for i in idx]
-                values = [self._values[i] for i in idx]
-            else:
-                dates, values = self._dates, self._values
-        else:
-            dates, values = self._dates, self._values
+        dates, values = self._visible_data()
 
         import matplotlib.dates as mdates
         x = mdates.date2num([datetime.datetime.combine(d, datetime.time())
                              for d in dates])
+        x_all = x
         y = np.asarray(values, dtype=float)
 
         keep = ~np.isnan(y)
@@ -676,6 +699,8 @@ class _IndicatorTab(QWidget):
         ax.plot(x, y, color=self.color, linewidth=1.6, drawstyle='steps-post')
         ax.fill_between(x, y, y2=np.nanmin(y), color=self.color, alpha=0.12,
                         step='post')
+
+        self._draw_pivots(ax)
 
         ax.grid(color=_GRID, linewidth=0.5, alpha=0.5)
         ax.set_ylabel(self.ylabel, color=_TXT)
@@ -703,6 +728,16 @@ class _IndicatorTab(QWidget):
         if self._show_phase and self.phaseLabel is not None:
             self._update_phase()
 
+        # Restore the previous X view (pan/zoom) when the visible data window
+        # is unchanged — e.g. toggling pivot markers must not reset the view.
+        if old_xlim is not None and self._data_x0 is not None:
+            lo, hi = old_xlim
+            xlo = min(self._data_x0, self._data_x1)
+            xhi = max(self._data_x0, self._data_x1)
+            if hi > lo and lo >= xlo and hi <= xhi:
+                ax.set_xlim(lo, hi)
+                self._fit_y(ax)
+
         # Restore any interval selection after a redraw (period change etc.).
         if self._sel_a is not None and self._sel_b is not None:
             self._band = ax.axvspan(
@@ -713,6 +748,57 @@ class _IndicatorTab(QWidget):
         self.fig.tight_layout()
         self.canvas.draw()
         self._sync_scrollbar()
+
+    def _visible_data(self):
+        """(dates, values) for the currently selected period."""
+        days = _PERIODS[self.periodCombo.currentIndex()][1]
+        if days is not None:
+            cutoff = datetime.date.today() - datetime.timedelta(days=days)
+            idx = [i for i, d in enumerate(self._dates) if d >= cutoff]
+            if idx:
+                return ([self._dates[i] for i in idx],
+                        [self._values[i] for i in idx])
+        return self._dates, self._values
+
+    def _pivot_marker_data(self):
+        """List of (x_num, y_value, color) for the current visible pivots."""
+        dates, values = self._visible_data()
+        import matplotlib.dates as mdates
+        x_all = mdates.date2num([datetime.datetime.combine(d, datetime.time())
+                                 for d in dates])
+        y = np.asarray(values, dtype=float)
+        keep = ~np.isnan(y)
+        out = []
+        for i, sign in pivot_indices(values, dates, **self._pivot_kwargs):
+            if not keep[i]:
+                continue
+            color = '#81c784' if sign < 0 else '#ef5350'
+            out.append((x_all[i], float(values[i]), color))
+        return out
+
+    def _clear_pivot_artists(self):
+        for a in self._pivot_artists:
+            if a.axes is not None:
+                a.remove()
+        self._pivot_artists = []
+
+    def _draw_pivots(self, ax):
+        """(Re)draw pivot markers on `ax` per the current checkbox state."""
+        self._clear_pivot_artists()
+        if not self.pivotCheck.isChecked():
+            return
+        for x, yv, color in self._pivot_marker_data():
+            sc = ax.scatter(x, yv, s=26, facecolors='none',
+                            edgecolors=color, linewidths=1.4, zorder=3)
+            self._pivot_artists.append(sc)
+
+    def _on_pivot_toggled(self, _checked):
+        """Toggle pivot markers without touching the rest of the chart."""
+        ax = self._axis()
+        if ax is None:
+            return
+        self._draw_pivots(ax)
+        self.canvas.draw()
 
     def set_late_cycle(self, is_late, message):
         """Reflect the late-cycle warning (from the dialog's background load)."""
@@ -932,6 +1018,28 @@ class MacroDialog(QDialog):
                 self._gdp_tab = tab
             self.tabs.addTab(tab, title)
             self._widgets.append(tab)
+
+        # Real-rate signal tab (Cleveland Fed ex-ante real rate), placed right
+        # after Real GDP. Its turning points drive the Buy/Sell S&P signal.
+        realrate = _IndicatorTab(
+            _REAL_RATE_ID, 'Ex-ante real rate (10Y)', 'Percent', '#ffb74d',
+            'Реальная ставка Кливлендского ФРС (модель ex-ante, горизонт 10 лет): '
+            'номинальные доходности минус модельная ожидаемая инфляция — без '
+            'ценовых шоков сырья и краткосрочной паники трейдеров.', self,
+            show_pivots=True,
+            pivot_kwargs=dict(smooth_days=90, range_frac=0.25,
+                              min_gap_days=120, local_days=730),
+            explain='Ожидаемая (ex-ante) реальная процентная ставка Кливлендского '
+                    'ФРС: номинальная доходность 10Y за вычетом модельной '
+                    'ожидаемой инфляции. В отличие от реализованной ставки '
+                    '(номинал − CPI) она не подвержена ценовым шокам сырья и '
+                    'краткосрочной панике трейдеров и точнее предсказывает '
+                    'развороты S&P 500. Точки перегиба: пик ставки (ставка '
+                    'начала падать) → зелёный BUY S&P; впадина (ставка начала '
+                    'расти) → красный SELL S&P.')
+        self.tabs.insertTab(1, realrate, 'Real Interest Rate (Ex-Ante)')
+        self._widgets.append(realrate)
+        self._realrate_tab = realrate
 
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
