@@ -353,10 +353,9 @@ class _YieldCurveTab(QWidget):
     def curve_comparison_message(self):
         """Short goat text comparing the current curve with a year ago.
 
-        Detects a parallel shift (up/down) and a slope change (steepening /
-        flattening) between today's snapshot and the one ~1 year back. Returns
-        '' when the change is below the thresholds or data is missing, so the
-        goat only speaks when something meaningful is visible.
+        Classifies the parallel shift (up/down) and the slope change
+        (steepening/flattening) and returns ONE coherent verdict — never two
+        opposing commands. Returns '' when nothing meaningful is visible.
         """
         now = self._snapshot(0)
         year_ago = self._snapshot(365)
@@ -380,23 +379,56 @@ class _YieldCurveTab(QWidget):
         slope_delta = (s_now - s_year) if (s_now is not None
                                            and s_year is not None) else 0.0
 
-        parts = []
         if shift > _CURVE_SHIFT_TOL:
-            parts.append('Кривая за год ушла вверх — ставки выросли по всем '
-                         'срокам, деньги дороже, ФРС ужесточила политику. '
-                         'Обычно это давит на S&P 500.')
+            shift_dir = 'up'
         elif shift < -_CURVE_SHIFT_TOL:
-            parts.append('Кривая за год ушла вниз — ФРС заливает рынок '
-                         'ликвидностью, деньги дешевеют. Плюс для S&P 500.')
+            shift_dir = 'down'
+        else:
+            shift_dir = 'neutral'
+
         if slope_delta > _CURVE_SLOPE_TOL:
-            parts.append('Кривая стала круче: дальний конец уходит выше '
-                         'ближнего — выход из инверсии, нормализация. '
-                         'Подтверждает BUY-маркеры перегиба.')
+            slope_dir = 'steep'
         elif slope_delta < -_CURVE_SLOPE_TOL:
-            parts.append('Кривая уплощается: короткие ставки растут быстрее '
-                         'длинных — реальная ставка скоро поползёт вверх, '
-                         'риск для S&P 500.')
-        return ' '.join(parts)
+            slope_dir = 'flat'
+        else:
+            slope_dir = 'neutral'
+
+        # Both axes agree: one directional message.
+        if shift_dir == 'up' and slope_dir == 'flat':
+            return ('Кривая за год ушла вверх и уплощается: ставки дорожают '
+                    'по всем срокам, короткие растут быстрее длинных — '
+                    'реальная ставка поползёт вверх, риск для S&P 500.')
+        if shift_dir == 'down' and slope_dir == 'steep':
+            return ('Кривая за год ушла вниз и стала круче: ликвидность '
+                    'дешевеет, дальний конец уходит выше ближнего — выход '
+                    'из инверсии, позитив для S&P 500.')
+        # Mixed signals: name both forces, no opposing commands.
+        if shift_dir == 'up' and slope_dir == 'steep':
+            return ('Кривая ушла вверх (деньги дороже), но одновременно '
+                    'стала круче — выход из инверсии. Дорогие деньги против '
+                    'нормализации: сигнал смешанный.')
+        if shift_dir == 'down' and slope_dir == 'flat':
+            return ('Кривая ушла вниз (ликвидность дешевеет), но '
+                    'уплощается — короткие ставки растут быстрее длинных. '
+                    'Дешёвые деньги против риска реальной ставки: сигнал '
+                    'смешанный.')
+        # Only one axis moved.
+        if shift_dir == 'up':
+            return ('Кривая за год ушла вверх — ставки выросли по всем '
+                    'срокам, деньги дороже, ФРС ужесточила политику. '
+                    'Обычно это давит на S&P 500.')
+        if shift_dir == 'down':
+            return ('Кривая за год ушла вниз — ФРС заливает рынок '
+                    'ликвидностью, деньги дешевеют. Плюс для S&P 500.')
+        if slope_dir == 'steep':
+            return ('Кривая стала круче: дальний конец уходит выше '
+                    'ближнего — выход из инверсии, нормализация. '
+                    'Подтверждает BUY-маркеры перегиба.')
+        if slope_dir == 'flat':
+            return ('Кривая уплощается: короткие ставки растут быстрее '
+                    'длинных — реальная ставка скоро поползёт вверх, '
+                    'риск для S&P 500.')
+        return ''
 
     def _redraw(self):
         self.fig.clear()

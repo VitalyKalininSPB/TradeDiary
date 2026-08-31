@@ -66,16 +66,16 @@ class GoatAssistant(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._place(parent)
 
-    def _place(self, parent):
-        if parent is not None and parent.isVisible():
-            anchor = parent.frameGeometry()
-            x = anchor.right() - self.width() - 8
-            y = anchor.center().y() - self.height() // 2
-        else:
-            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
-            x = screen.right() - self.width() - 8
-            y = screen.center().y() - self.height() // 2
-        self.move(x, max(4, y))
+    def _place(self, parent=None):
+        """Anchor to the bottom-right corner of the screen, not the window.
+
+        The bubble sits to the left of the goat, so placing the right edge of
+        the widget against the screen's right edge keeps the phrase visible.
+        """
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        x = screen.right() - self.width() - 8
+        y = screen.bottom() - self.height() - 8
+        self.move(x, y)
 
     def paintEvent(self, event):
         p = QPainter(self)

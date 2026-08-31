@@ -24,6 +24,9 @@ import requests
 
 from pivots import pivot_indices
 from yield_curve import YIELD_CURVE_SERIES, _YieldCurveTab, compute_ntfs_series
+from credit_spread import CreditSpreadTab
+from vix_tab import VixTab
+from mlrci import MlrcTab, compute_mlrci, compute_net_liquidity
 
 from matplotlib.collections import PolyCollection
 
@@ -170,6 +173,38 @@ def _load_ntfs(series_id):
     """
     series = {sid: _fred(sid) for sid in ('DTB3', 'DGS6MO', 'DGS1', 'DGS2')}
     return compute_ntfs_series(series)
+
+
+def _load_mlrci(series_id):
+    """MLRCI composite series: fetches all components from cache and computes."""
+    from mlrci import (_REAL_ID, _WALCL_ID, _TGA_ID, _RRP_ID,
+                       _BBB_ID, _VIX_ID, _NTFS_SHORT)
+    series = {}
+    for sid in set([_REAL_ID, _WALCL_ID, _TGA_ID, _RRP_ID, _BBB_ID, _VIX_ID]
+                   + list(_NTFS_SHORT)):
+        series[sid] = _fred(sid)
+    return compute_mlrci(series)
+
+
+def _load_mlrci_marks(series_id):
+    """STRONG BUY/SELL marker points for the MLRCI chart.
+
+    Returns (dates, values) where values encode +1 for STRONG BUY and -1 for
+    STRONG SELL at the dates the signal turns on. Runs in the background thread.
+    """
+    from mlrci import (_REAL_ID, _WALCL_ID, _TGA_ID, _RRP_ID,
+                       _BBB_ID, _VIX_ID, _NTFS_SHORT, compute_mlrci_full)
+    series = {}
+    for sid in set([_REAL_ID, _WALCL_ID, _TGA_ID, _RRP_ID, _BBB_ID, _VIX_ID]
+                   + list(_NTFS_SHORT)):
+        series[sid] = _fred(sid)
+    _dates, _values, buy, sell = compute_mlrci_full(series)
+    dates = [d for d, _v in buy] + [d for d, _v in sell]
+    values = [1] * len(buy) + [-1] * len(sell)
+    pairs = sorted(zip(dates, values))
+    if pairs:
+        return [d for d, _v in pairs], [v for _d, v in pairs]
+    return [], []
 
 
 def _load_buffett(series_id=None):
@@ -585,6 +620,7 @@ class _IndicatorTab(QWidget):
 
         if description:
             self.descLabel = QLabel(description)
+            self.descLabel.setWordWrap(True)
             self.descLabel.setStyleSheet('color: #6a6d78; font-size: 11px;')
             root.addWidget(self.descLabel)
 
@@ -1065,19 +1101,30 @@ class MacroDialog(QDialog):
         self.tabs = QTabWidget()
         self._widgets = []
         self._gdp_tab = None
+        # Fixed tab order — build every tab widget first, then add them all in
+        # one pass. No insertTab position arithmetic, so the layout is static.
+        ordered = []
+
+        # 0. MLRCI composite indicator: whole dashboard in one risk oscillator.
+        self._mlrci_tab = MlrcTab(self)
+        ordered.append(('MLRCI Composite', self._mlrci_tab))
+
+        # 1. Real GDP (GDPC1) with market-cycle phase and late-cycle label, right
+        # after MLRCI. The rest of the plain FRED indicators go after the
+        # credit-spread block (see below).
         for series_id, title, plot_label, ylabel, color, desc in INDICATORS:
             is_gdp = (series_id == 'GDPC1')
+            if not is_gdp:
+                continue
             tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
-                                self, show_phase=is_gdp,
-                                show_late_cycle=is_gdp)
-            if is_gdp:
-                tab._phase_fn = _gdp_phase
-                self._gdp_tab = tab
-            self.tabs.addTab(tab, title)
+                                self, show_phase=True, show_late_cycle=True)
+            tab._phase_fn = _gdp_phase
+            self._gdp_tab = tab
+            ordered.append((title, tab))
             self._widgets.append(tab)
 
-        # Real-rate signal tab (Cleveland Fed ex-ante real rate), placed right
-        # after Real GDP. Its turning points drive the Buy/Sell S&P signal.
+        # 2. Real-rate signal tab (Cleveland Fed ex-ante real rate). Its
+        # turning points drive the Buy/Sell S&P signal.
         realrate = _IndicatorTab(
             _REAL_RATE_ID, 'Ex-ante real rate (10Y)', 'Percent', '#ffb74d',
             'Реальная ставка Кливлендского ФРС (модель ex-ante, горизонт 10 лет): '
@@ -1094,25 +1141,71 @@ class MacroDialog(QDialog):
                     'развороты S&P 500. Точки перегиба: пик ставки (ставка '
                     'начала падать) → зелёный BUY S&P; впадина (ставка начала '
                     'расти) → красный SELL S&P.')
-        self.tabs.insertTab(1, realrate, 'Real Interest Rate (Ex-Ante)')
+        ordered.append(('Real Interest Rate (Ex-Ante)', realrate))
         self._widgets.append(realrate)
         self._realrate_tab = realrate
 
+        # 3. Yield curve (3M-30Y) with historical snapshots.
+        self._yield_tab = _YieldCurveTab(self)
+        ordered.append(('Yield Curve', self._yield_tab))
+
+        # 4. VIX with fear/panic zones.
+        self._vix_tab = VixTab(self)
+        ordered.append(('VIX (Volatility)', self._vix_tab))
+
+        # 5-6. Credit spreads: BBB and high-yield.
+        credit = [
+            ('BAMLC0A4CBBB', 'BBB Credit Spread (BAMLC0A4CBBB)',
+             'BBB corporate credit spread', 'Percent', '#e57373',
+             'Спред доходности корпоративных облигаций класса BBB к '
+             'безрисковым казначейским (ICE BofA). BBB — нижняя граница '
+             'инвестиционного рейтинга: это надёжные, крупные компании, '
+             'которые первыми реагируют на проблемы среди гигантов. '
+             'Расширение спреда = рост кредитного риска и распродажа в '
+             'корпоративном секторе; сужение = уверенность рынка в '
+             'надёжных компаниях.'),
+            ('BAMLH0A0HYM2', 'Junk Bonds / High Yield Spread (BAMLH0A0HYM2)',
+             'High-yield corporate credit spread', 'Percent', '#ba68c8',
+             'Спред «мусорных» (junk / high yield) облигаций компаний с '
+             'высокой долговой нагрузкой к безрисковым казначейским '
+             '(ICE BofA). Самый чувствительный кредитный индикатор: при '
+             'первых признаках стресса инвесторы сбрасывают самые '
+             'рискованные бумаги и спред резко расширяется — ранний сигнал '
+             'к падению рынка акций; сужение = аппетит к риску.'),
+        ]
+        for series_id, title, plot_label, ylabel, color, desc in credit:
+            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
+                                self)
+            ordered.append((title, tab))
+            self._widgets.append(tab)
+
+        # 7. BBB corporate yield vs 10Y Treasury benchmark.
+        self._credit_tab = CreditSpreadTab(self)
+        ordered.append(('BBB Yield vs 10Y Treasury', self._credit_tab))
+
+        # Remaining plain FRED indicators (CPI, unemployment, rates, payrolls,
+        # consumer sentiment, corporate profits) — after the credit block.
+        for series_id, title, plot_label, ylabel, color, desc in INDICATORS:
+            if series_id == 'GDPC1':
+                continue
+            tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
+                                self)
+            ordered.append((title, tab))
+            self._widgets.append(tab)
+
+        # 8. Buffett indicator.
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
             'Соотношение капитализации американского рынка к ВВП', self)
         buffett.descLabel.setText(
             'Индикатор Баффета — капитализация американского рынка к ВВП: '
             '<100% — рынок дешевле экономики, >100% — дороже.')
-        self.tabs.addTab(buffett, 'Buffett Indicator')
+        ordered.append(('Buffett Indicator', buffett))
         self._widgets.append(buffett)
         self._buffett_tab = buffett
 
-        # Yield-curve tab at fixed position 3 (0-based index 2): term structure
-        # (3M-30Y) with historical snapshots, so steepening/flattening/inversion
-        # is visible.
-        self._yield_tab = _YieldCurveTab(self)
-        self.tabs.insertTab(2, self._yield_tab, 'Yield Curve')
+        for title, tab in ordered:
+            self.tabs.addTab(tab, title)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
@@ -1141,10 +1234,28 @@ class MacroDialog(QDialog):
         if series_id == 'NTFS':
             self._yield_tab.set_ntfs(dates, values)
             return
+        if series_id == 'MLRCI':
+            self._mlrci_tab.set_mlrci(dates, values)
+            return
+        if series_id == 'MLRCI_MARKS':
+            buy = [(d, v) for d, v in zip(dates, values) if v == 1]
+            sell = [(d, v) for d, v in zip(dates, values) if v == -1]
+            self._mlrci_tab.set_marks(buy, sell)
+            return
+        if series_id == 'SP500':
+            self._mlrci_tab.set_sp500(dates, values)
+            return
         if series_id == _REAL_RATE_ID:
             self._yield_tab.set_real_rate(dates, values)
         if series_id in self._yield_tab.series_ids:
             self._yield_tab.set_series(series_id, dates, values)
+        if series_id in self._credit_tab.series_ids:
+            self._credit_tab.set_series(series_id, dates, values)
+        if series_id in self._vix_tab.series_ids:
+            self._vix_tab.set_data(dates, values, note)
+        if series_id in self._yield_tab.series_ids \
+                or series_id in self._credit_tab.series_ids \
+                or series_id in self._vix_tab.series_ids:
             return
         for tab in self._widgets:
             if tab.series_id == series_id:
@@ -1210,6 +1321,11 @@ class MacroDialog(QDialog):
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
         items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
+        items.extend((sid, _fred) for sid in self._credit_tab.series_ids)
+        items.extend((sid, _fred) for sid in self._vix_tab.series_ids)
+        items.append(('MLRCI', _load_mlrci))
+        items.append(('MLRCI_MARKS', _load_mlrci_marks))
+        items.append(('SP500', _fred))
         items.append(('NTFS', _load_ntfs))
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
