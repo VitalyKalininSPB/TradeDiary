@@ -115,6 +115,30 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
 - `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
 
+## S&P 500: инструменты и прокси доходности (важно для backtest-запросов)
+
+Прямого торгуемого инструмента на S&P 500 на MOEX сейчас **нет** (проверено):
+
+- ETF на S&P 500 **делистированы с MOEX после 2022**: `TSPX` (Т-Капитал США 500),
+  `AKSP` (Альфа S&P 500), `SBSP` (Первая — Американские акции) — свечи обрываются
+  в 2021–2023, marketdata пустая.
+- Остались только **iNAV — расчётные цены паёв (не торгуемые)**: `SBSPA`/`SBSPB`
+  (Первая — Америк. акции, USD/RUB), `AKSPA` (Альфа), `RCUSA`/`RCUSB` (Райффайзен),
+  `TSPVA`/`TSPVB` — свечей у них нет.
+- **СПБ Биржа недоступна из этого окружения**: `spbexchange.ru` и `iss.spbex.ru`
+  не резолвятся (сетевые таймауты), веб-поиск тоже 403. Не рассчитывать на неё.
+
+Рабочий **прокси для доходности S&P 500 в рублях**:
+- индекс S&P 500 — FRED `SP500` (USD, кэшируется в `macro_cache.db` через `_fred`);
+- курс USD/RUB — исторические свечи MOEX `USD000UTSTOM`
+  (`https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM/candles.json`).
+- Сигналы BUY/SELL для бэктеста — `compute_mlrci_full()` в `mlrci.py`
+  (STRONG BUY = зелёный ▲, STRONG SELL = красный ▼ на табе MLRCI).
+
+Пример расчёта (с 01.01.2024, 500 000 ₽, сигналы MLRCI: BUY 20.02.2024 → SELL 07.08.2026):
+S&P 4769.83 → 7709.96 (+61.6%), но USD/RUB 90.7 → 81.78 (−9.8%) → чистая доходность
+**+45.7%** (728 717 ₽) против +55.0% у «купи и держи» до 28.08.2026.
+
 ## UI и генерация
 
 - `.ui` файлы (`form.ui`, `deal.ui`, `editdeal.ui`) загружаются в рантайме через
