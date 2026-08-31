@@ -32,7 +32,8 @@ from matplotlib.figure import Figure
 from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QComboBox)
+                               QComboBox, QScrollBar)
+from PySide6.QtCore import Qt
 
 _BG = '#1e1f24'
 _TXT = '#dcdce0'
@@ -71,6 +72,9 @@ _SELL_LEVEL = -80.0
 
 _PERIODS = [('1Y', 365), ('3Y', 3 * 365), ('5Y', 5 * 365), ('10Y', 10 * 365),
             ('Max', None)]
+
+# Data-unit -> scrollbar-integer scaling (QScrollBar is int-only).
+_SCROLL_SCALE = 100
 
 
 def _zscore(values, window):
@@ -341,6 +345,27 @@ class MlrcTab(QWidget):
         self.canvas = FigureCanvas(self.fig)
         root.addWidget(self.canvas)
 
+        self.scroll = QScrollBar(Qt.Orientation.Horizontal)
+        self.scroll.setToolTip('Горизонтальный скролл / панорамирование по датам')
+        root.addWidget(self.scroll)
+        self.scroll.valueChanged.connect(self._on_scrollbar)
+
+        # Zoom/pan state (in date-number coords, like _IndicatorTab).
+        self._data_x0 = None
+        self._data_x1 = None
+        self._view_span = None
+        self._dragging = False
+        self._sel_a = None
+        self._sel_b = None
+        self._band = None
+        self._syncing_scroll = False
+        for ev, fn in (('scroll_event', self._on_scroll),
+                       ('button_press_event', self._on_press),
+                       ('motion_notify_event', self._on_motion),
+                       ('button_release_event', self._on_release),
+                       ('button_press_event', self._on_double)):
+            self.canvas.mpl_connect(ev, fn)
+
         self.stateLabel = QLabel('')
         self.stateLabel.setWordWrap(True)
         root.addWidget(self.stateLabel)
@@ -370,6 +395,10 @@ class MlrcTab(QWidget):
         return self._dates, self._values
 
     def _redraw(self):
+        old_xlim = None
+        ax_old = self._axis()
+        if ax_old is not None and ax_old.get_lines():
+            old_xlim = ax_old.get_xlim()
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.set_facecolor(_BG)
@@ -387,6 +416,12 @@ class MlrcTab(QWidget):
         x = mdates.date2num([datetime.datetime.combine(d, datetime.time())
                              for d in dates])
         y = np.asarray(values, dtype=float)
+
+        if len(x) > 0:
+            self._data_x0 = float(np.nanmin(x))
+            self._data_x1 = float(np.nanmax(x))
+        else:
+            self._data_x0 = self._data_x1 = None
 
         # Extreme zones and guide lines.
         ax.axhspan(_BUY_LEVEL, 100, color=_UP, alpha=0.12, zorder=0)
@@ -457,9 +492,18 @@ class MlrcTab(QWidget):
 
         latest = self._values[-1] if self._values else float('nan')
         ax.set_title('MLRCI — latest {:.0f}'.format(latest), color=_TXT)
+
+        # Restore the previous X view (pan/zoom) when the visible data window
+        # is unchanged — e.g. toggling markers must not reset the view.
+        if old_xlim is not None and self._data_x0 is not None:
+            lo, hi = old_xlim
+            if hi > lo and lo >= self._data_x0 and hi <= self._data_x1:
+                ax.set_xlim(lo, hi)
+
         self._update_state(latest)
         self.fig.tight_layout()
         self.canvas.draw()
+        self._sync_scrollbar()
 
     def _update_state(self, v):
         if v != v:  # NaN
@@ -482,3 +526,139 @@ class MlrcTab(QWidget):
         self.stateLabel.setText(txt)
         self.stateLabel.setStyleSheet(
             'color: {}; font-weight: bold;'.format(color))
+
+    # ------------------------------------------------------------------ nav
+    def _axis(self):
+        return self.fig.axes[0] if self.fig.axes else None
+
+    def _sync_scrollbar(self):
+        if self._data_x0 is None:
+            self._syncing_scroll = True
+            self.scroll.setRange(0, 0)
+            self._syncing_scroll = False
+            return
+        ax = self._axis()
+        if ax is None:
+            return
+        lo, hi = ax.get_xlim()
+        self._view_span = hi - lo
+        full = self._data_x1 - self._data_x0
+        page = max(1, int(round(self._view_span * _SCROLL_SCALE)))
+        self._syncing_scroll = True
+        try:
+            self.scroll.setRange(0, int(round(full * _SCROLL_SCALE)))
+            self.scroll.setPageStep(page)
+            self.scroll.setValue(int(round(lo * _SCROLL_SCALE)))
+        finally:
+            self._syncing_scroll = False
+
+    def _on_scrollbar(self, value):
+        if self._syncing_scroll or self._data_x0 is None or self._view_span is None:
+            return
+        ax = self._axis()
+        if ax is None:
+            return
+        lo = value / float(_SCROLL_SCALE)
+        hi = lo + self._view_span
+        data_low, data_high = min(self._data_x0, self._data_x1), max(self._data_x0, self._data_x1)
+        if hi > data_high:
+            hi = data_high
+            lo = hi - self._view_span
+        if lo < data_low:
+            lo = data_low
+            hi = lo + self._view_span
+        ax.set_xlim(lo, hi)
+        self._fit_y(ax)
+        self.canvas.draw()
+
+    def _set_band(self, a, b):
+        ax = self._axis()
+        if ax is None:
+            return
+        if self._band is not None and self._band.axes is not None:
+            self._band.remove()
+        self._band = ax.axvspan(min(a, b), max(a, b), color=_MLRCI,
+                                alpha=0.30, linewidth=0, zorder=2)
+
+    def _fit_y(self, ax):
+        """Rescale the Y axis to the data currently visible in the X window."""
+        if not ax.get_lines():
+            return
+        x = np.asarray(ax.get_lines()[0].get_xdata())
+        y = np.ma.filled(ax.get_lines()[0].get_ydata(), np.nan)
+        xmin, xmax = ax.get_xlim()
+        keep = (x >= xmin) & (x <= xmax) & ~np.isnan(y)
+        if keep.sum() < 2:
+            return
+        with np.errstate(all='ignore'):
+            ymin, ymax = np.nanmin(y[keep]), np.nanmax(y[keep])
+        span = ymax - ymin
+        pad = (span if span > 0 else abs(ymax) or 1.0) * 0.06
+        ax.set_ylim(ymin - pad, ymax + pad)
+        ax.set_autoscaley_on(False)  # keep it: draw() would otherwise re-autoscale.
+
+    def _on_scroll(self, event):
+        ax = self._axis()
+        if ax is None or ax.get_xlim()[1] <= ax.get_xlim()[0]:
+            return
+        base = event.xdata
+        if base is None:  # cursor outside the plot area -> zoom around the centre.
+            base = (ax.get_xlim()[0] + ax.get_xlim()[1]) / 2.0
+        half = (ax.get_xlim()[1] - ax.get_xlim()[0]) / 2.0
+        factor = 0.80 if event.step > 0 else 1.25
+        ax.set_xlim(base - half * factor, base + half * factor)
+        self._fit_y(ax)
+        self.canvas.draw()
+        self._sync_scrollbar()
+
+    def _on_press(self, event):
+        if event.button == 1 and event.inaxes is not None:
+            self._dragging = True
+            self._sel_a = event.xdata
+            self._sel_b = event.xdata
+            self._set_band(self._sel_a, self._sel_b)
+            self._band.set_alpha(0.5)
+            self.canvas.draw()
+
+    def _on_motion(self, event):
+        if self._dragging and event.inaxes is not None and event.xdata is not None:
+            self._sel_b = event.xdata
+            self._set_band(self._sel_a, self._sel_b)
+            self.canvas.draw()
+
+    def _on_release(self, event):
+        if not self._dragging:
+            return
+        self._dragging = False
+        if self._sel_a is None or self._sel_b is None:
+            return
+        a, b = min(self._sel_a, self._sel_b), max(self._sel_a, self._sel_b)
+        if abs(b - a) < 1e-6:  # a plain click, not a selection
+            self._set_band(a, a)
+            self.canvas.draw()
+            return
+        ax = self._axis()
+        if ax is not None:
+            xmin, xmax = ax.get_xlim()
+            pad = (b - a) * 0.06
+            ax.set_xlim(max(xmin, a - pad), min(xmax, b + pad))
+            self._fit_y(ax)
+            ax.figure.canvas.draw()
+            self._sync_scrollbar()
+        # Selection is applied; drop the highlight so the zoomed-in chart is clean.
+        self._sel_a = self._sel_b = None
+        if self._band is not None:
+            self._band.remove()
+            self._band = None
+        self.canvas.draw()
+
+    def _on_double(self, event):
+        if event.dblclick:
+            self._reset_view()
+
+    def _reset_view(self):
+        self._sel_a = self._sel_b = None
+        if self._band is not None:
+            self._band.remove()
+            self._band = None
+        self._redraw()
