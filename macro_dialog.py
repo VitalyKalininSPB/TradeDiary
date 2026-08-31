@@ -23,7 +23,7 @@ from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 import requests
 
 from pivots import pivot_indices
-from yield_curve import YIELD_CURVE_SERIES, _YieldCurveTab
+from yield_curve import YIELD_CURVE_SERIES, _YieldCurveTab, compute_ntfs_series
 
 from matplotlib.collections import PolyCollection
 
@@ -160,6 +160,16 @@ def _fred(series_id):
     except Exception as e:  # noqa: BLE001 - cache write must not fail the fetch
         print('Failed to cache {}: {}'.format(series_id, e))
     return dates, values
+
+
+def _load_ntfs(series_id):
+    """NTFS (Engstrom-Sharpe near-term forward spread) series for the yield tab.
+
+    Computed from the cached FRED yields (DTB3, DGS6MO, DGS1, DGS2), so it
+    belongs on the background loader thread, never the UI thread.
+    """
+    series = {sid: _fred(sid) for sid in ('DTB3', 'DGS6MO', 'DGS1', 'DGS2')}
+    return compute_ntfs_series(series)
 
 
 def _load_buffett(series_id=None):
@@ -1052,10 +1062,11 @@ class MacroDialog(QDialog):
         self._widgets.append(buffett)
         self._buffett_tab = buffett
 
-        # Yield-curve tab at fixed position 3: term structure (3M-30Y) with
-        # historical snapshots, so steepening/flattening/inversion is visible.
+        # Yield-curve tab at fixed position 3 (0-based index 2): term structure
+        # (3M-30Y) with historical snapshots, so steepening/flattening/inversion
+        # is visible.
         self._yield_tab = _YieldCurveTab(self)
-        self.tabs.insertTab(3, self._yield_tab, 'Yield Curve')
+        self.tabs.insertTab(2, self._yield_tab, 'Yield Curve')
         root.addWidget(self.tabs, 1)
 
         self.reloadButton = self._build_footer(root)
@@ -1080,6 +1091,11 @@ class MacroDialog(QDialog):
         if series_id in (_LATE_GDPI, _LATE_CC):
             self._late_data[series_id] = (dates, values)
             return
+        if series_id == 'NTFS':
+            self._yield_tab.set_ntfs(dates, values)
+            return
+        if series_id == _REAL_RATE_ID:
+            self._yield_tab.set_real_rate(dates, values)
         if series_id in self._yield_tab.series_ids:
             self._yield_tab.set_series(series_id, dates, values)
             return
@@ -1133,6 +1149,7 @@ class MacroDialog(QDialog):
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
         items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
+        items.append(('NTFS', _load_ntfs))
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
         self._loader = _ChartLoaderThread(items, self)
