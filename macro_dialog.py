@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import bisect
+import csv
 import math
 
 import numpy as np
@@ -32,7 +33,8 @@ from matplotlib.collections import PolyCollection
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                                QWidget, QLabel, QComboBox, QApplication,
-                               QMessageBox, QScrollBar, QCheckBox)
+                               QMessageBox, QScrollBar, QCheckBox,
+                               QPushButton, QFileDialog)
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap
 
@@ -77,6 +79,52 @@ INDICATORS = [
 _BUFFETT_ID = 'BUFFETT'
 _BUFFETT_CAP_ID = 'NCBEILQ027S'
 _BUFFETT_GDP_ID = 'GDP'
+
+# ISM Manufacturing/Services PMI: FRED removed the series (manufacturing data
+# ends 2016), the DBnomics mirror stopped updating and ism_web closes to
+# automated access (403). Data is loaded manually from a CSV exported via an AI
+# assistant (see _build_ism_prompt -> _*_PROMPT; cached with no TTL in _load_ism).
+_ISM_ID = 'ISM_PMI'
+_ISM_NAME = 'ISM Manufacturing PMI'
+_ISM_SERVICES_ID = 'ISM_SERVICES'
+_ISM_SERVICES_NAME = 'ISM Services PMI'
+
+
+def _build_ism_prompt(name, context, period='2000-01-01'):
+    """Prompt that asks an assistant to dump the full ISM PMI series as CSV.
+
+    The assistant cannot write files, so it emits a date,value CSV block that the
+    user saves to disk and imports through the tab's Load button.
+    """
+    return (
+        'Ты — эксперт по индексу деловой активности {ctx} '
+        '({name}; >50 = расширение, <50 = сокращение).\n\n'
+        'Задача: выгрузить ПОЛНЫЙ исторический ряд {name} одним CSV-блоком. '
+        'Никаких пояснений, вступлений или «...».\n\n'
+        'Формат — одна строка на месяц, разделитель запятая:\n'
+        'date,value\n'
+        '{period},49.3\n'
+        '2000-02-01,50.9\n\n'
+        'Требования:\n'
+        '1. date — ISO YYYY-MM-DD, первый день месяца.\n'
+        '2. value — индекс, одно десятичное через точку (или NA, если значение '
+        'не подтверждено).\n'
+        '3. Период: с {period} по последний опубликованный месяц; без пропусков.\n'
+        '4. Источник — официальный сезонно скорректированный {name}; сверь по '
+        'нескольким источникам (Reuters / пресс-релизы ISM).\n'
+        '5. Если ответ не помещается целиком — продолжай в следующем сообщении с '
+        'точного места обрыва, не повторяя уже выданные строки.\n'
+        '6. Не выдумывай значения: неподтверждённое → NA (строку с датой всё '
+        'равно оставь).\n\n'
+        'Верни ТОЛЬКО CSV-блок.'
+    ).format(name=name, ctx=context, period=period)
+
+
+_ISM_PROMPT = _build_ism_prompt(_ISM_NAME, 'в обрабатывающей промышленности США')
+_ISM_SERVICES_PROMPT = _build_ism_prompt(_ISM_SERVICES_NAME, 'в сфере услуг США')
+
+# Series that have no machine source and are imported manually (Load button).
+_MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID)
 
 # Cleveland Fed ex-ante (expected) real interest rate, 10-year horizon. A
 # model-based real rate (nominal yields minus model-implied expected inflation,
@@ -162,6 +210,61 @@ def _fred(series_id):
         _save_cached(series_id, dates, values)
     except Exception as e:  # noqa: BLE001 - cache write must not fail the fetch
         print('Failed to cache {}: {}'.format(series_id, e))
+    return dates, values
+
+
+def _load_ism(series_id):
+    """Load a manually-imported ISM PMI series from the cache (no TTL).
+
+    There is no machine source to re-fetch from, so a cached row is always
+    served (not expired by CACHE_TTL). Returns ([], []) when nothing was
+    imported yet.
+    """
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT data FROM macro_series WHERE series_id=?", (series_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return [], []
+    try:
+        data = json.loads(row[0])
+        dates = [datetime.date.fromisoformat(d) for d in data['dates']]
+        values = data['values']
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return [], []
+    return dates, values
+
+
+def _parse_ism_csv(path):
+    """Parse a `date,value` CSV (as exported by the ISM prompt) into a series.
+
+    Rows are sorted by date ascending; missing/non-numeric values (NA, nan)
+    become NaN so the chart shows a gap instead of a bogus point.
+    """
+    dates, values = [], []
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        for raw in csv.reader(f):
+            if not raw or len(raw) < 2:
+                continue
+            d_raw = raw[0].strip()
+            try:
+                d = datetime.date.fromisoformat(d_raw)
+            except ValueError:
+                continue  # header row or unparseable date
+            v_raw = raw[1].strip().replace(',', '').replace('%', '')
+            try:
+                v = float(v_raw)
+            except ValueError:
+                v = float('nan')
+            dates.append(d)
+            values.append(v)
+    if dates:
+        order = sorted(range(len(dates)), key=lambda i: dates[i])
+        dates = [dates[i] for i in order]
+        values = [values[i] for i in order]
     return dates, values
 
 
@@ -566,7 +669,7 @@ class _IndicatorTab(QWidget):
     def __init__(self, series_id, plot_label, ylabel, color, description='',
                  parent=None, show_regime=False, show_phase=False,
                  show_late_cycle=False, show_pivots=False,
-                 pivot_kwargs=None, explain=''):
+                 pivot_kwargs=None, explain='', show_load_button=False):
         super().__init__(parent)
         self.series_id = series_id
         self.plot_label = plot_label
@@ -584,6 +687,9 @@ class _IndicatorTab(QWidget):
         self._regime_fn = None   # (values) -> 'bull'/'bear'/None (plugged by caller)
         self._regime_icon = None  # (name) -> QPixmap or None
         self._phase_fn = None    # (dates, values) -> (ru, en) or None
+        self._on_manual_load = None   # () -> None, plugged by caller for the Load button
+        self._on_show_prompt = None   # () -> None, plugged by the Prompt button
+        self._hline = None   # y-value for a horizontal reference line (e.g. 50 for PMI)
 
         self._dates = []
         self._values = []
@@ -616,6 +722,18 @@ class _IndicatorTab(QWidget):
         self.periodCombo.currentIndexChanged.connect(
             lambda _i: self._redraw())
         bar.addWidget(self.periodCombo)
+        if show_load_button:
+            self.loadButton = QPushButton('Load')
+            self.loadButton.setToolTip(
+                'Загрузить ISM Manufacturing PMI из CSV, выгруженного '
+                'ассистентом (кнопка «Промт»).')
+            self.loadButton.clicked.connect(self._on_load_button)
+            bar.addWidget(self.loadButton)
+            self.promptButton = QPushButton('Промт')
+            self.promptButton.setToolTip(
+                'Скопировать в буфер обмена промт для выгрузки ISM PMI.')
+            self.promptButton.clicked.connect(self._on_prompt_button)
+            bar.addWidget(self.promptButton)
         root.addLayout(bar)
 
         if description:
@@ -690,6 +808,22 @@ class _IndicatorTab(QWidget):
             self.hintLabel.setText('')
             self.hintLabel.hide()
 
+    def set_manual_loader(self, fn):
+        """Plug a () -> None callback for the Load button."""
+        self._on_manual_load = fn
+
+    def set_show_prompt(self, fn):
+        """Plug a () -> None callback for the Prompt button."""
+        self._on_show_prompt = fn
+
+    def _on_load_button(self):
+        if self._on_manual_load is not None:
+            self._on_manual_load()
+
+    def _on_prompt_button(self):
+        if self._on_show_prompt is not None:
+            self._on_show_prompt()
+
     def _update_regime(self):
         """Set the bull/bear icon + text using the plugged-in functions."""
         if self._regime_fn is None:
@@ -748,6 +882,13 @@ class _IndicatorTab(QWidget):
                         step='post')
 
         self._draw_pivots(ax)
+
+        if self._hline is not None:
+            ax.axhline(self._hline, color='#90a4ae', linewidth=1.0,
+                       linestyle='--', alpha=0.85)
+            ax.text(0.006, self._hline, '  {}'.format(self._hline),
+                    transform=ax.get_yaxis_transform(), color=_TXT,
+                    fontsize=8, va='center')
 
         ax.grid(color=_GRID, linewidth=0.5, alpha=0.5)
         ax.set_ylabel(self.ylabel, color=_TXT)
@@ -1074,8 +1215,11 @@ class _ChartLoaderThread(QThread):
         for series_id, loader in self._items:
             try:
                 dates, values = loader(series_id)
-                note = '{:,} points, {}..{}'.format(
-                    len(values), dates[0].isoformat(), dates[-1].isoformat())
+                if dates:
+                    note = '{:,} points, {}..{}'.format(
+                        len(values), dates[0].isoformat(), dates[-1].isoformat())
+                else:
+                    note = 'no data'
             except Exception as e:  # noqa: BLE001 - surfacing fetch errors
                 dates, values, note = [], [], 'Error: {}'.format(e)
             self.row_loaded.emit(series_id, dates, values, note)
@@ -1101,6 +1245,8 @@ class MacroDialog(QDialog):
         self.tabs = QTabWidget()
         self._widgets = []
         self._gdp_tab = None
+        self._ism_tab = None
+        self._ism_services_tab = None
         # Fixed tab order — build every tab widget first, then add them all in
         # one pass. No insertTab position arithmetic, so the layout is static.
         ordered = []
@@ -1193,24 +1339,46 @@ class MacroDialog(QDialog):
             ordered.append((title, tab))
             self._widgets.append(tab)
 
-        # 8. ISM Manufacturing PMI — данные недоступны (FRED убрал ISM в 2016,
-        # зеркало DBnomics не обновляется с 08.2025, сайт ISM закрыт — 403).
-        ism = QWidget(self)
-        ism_layout = QVBoxLayout(ism)
-        ism_layout.setContentsMargins(16, 16, 16, 16)
-        ism_label = QLabel(
-            'ISM Manufacturing PMI — данные недоступны.\n'
-            'Бесплатного машинного источника нет: FRED убрал ISM в 2016, '
-            'зеркало DBnomics перестало обновляться (последнее значение '
-            '08.2025), сайт ISM закрыт для автоматического доступа (403).')
-        ism_label.setWordWrap(True)
-        ism_label.setStyleSheet('color: #ef9a9a; font-weight: bold;')
-        ism_layout.addStretch(1)
-        ism_layout.addWidget(ism_label)
-        ism_layout.addStretch(1)
-        ordered.append(('ISM Manufacturing PMI', ism))
+        # 8. ISM Manufacturing PMI — нет бесплатного машинного источника: FRED
+        # убрал ISM в 2016, зеркало DBnomics не обновляется с 08.2025, сайт ISM
+        # закрыт (403). Данные выгружаются через ассистента (кнопка «Промт») и
+        # подгружаются из CSV кнопкой «Load».
+        ism_m = _IndicatorTab(
+            _ISM_ID, 'ISM Manufacturing PMI', 'Index (PMI)', '#a5d6a7',
+            'Индекс деловой активности в обрабатывающей промышленности США; '
+            '>50 — расширение, <50 — сокращение.', self,
+            show_load_button=True)
+        ism_m._hline = 50
+        ism_m.set_manual_loader(
+            lambda: self._load_manual_csv(_ISM_ID, ism_m, _ISM_NAME))
+        ism_m.set_show_prompt(
+            lambda: self._show_manual_prompt(_ISM_NAME, _ISM_PROMPT))
+        ism_m.set_hint('Нажмите «Промт» (скопировать запрос в буфер обмена), '
+                       'затем «Load» и выберите выгруженный CSV.', '#ef9a9a')
+        self._ism_tab = ism_m
+        self._widgets.append(ism_m)
+        ordered.append(('ISM Manufacturing PMI', ism_m))
 
-        # 9. Buffett indicator.
+        # 9. ISM Services PMI — тот же ручной импорт (см. комментарий выше).
+        ism_s = _IndicatorTab(
+            _ISM_SERVICES_ID, 'ISM Services PMI', 'Index (PMI)', '#a5d6a7',
+            'Индекс деловой активности в сфере услуг США; '
+            '>50 — расширение, <50 — сокращение.', self,
+            show_load_button=True)
+        ism_s._hline = 50
+        ism_s.set_manual_loader(
+            lambda: self._load_manual_csv(_ISM_SERVICES_ID, ism_s,
+                                          _ISM_SERVICES_NAME))
+        ism_s.set_show_prompt(
+            lambda: self._show_manual_prompt(_ISM_SERVICES_NAME,
+                                             _ISM_SERVICES_PROMPT))
+        ism_s.set_hint('Нажмите «Промт» (скопировать запрос в буфер обмена), '
+                       'затем «Load» и выберите выгруженный CSV.', '#ef9a9a')
+        self._ism_services_tab = ism_s
+        self._widgets.append(ism_s)
+        ordered.append(('ISM Services PMI', ism_s))
+
+        # 10. Buffett indicator.
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
             'Соотношение капитализации американского рынка к ВВП', self)
@@ -1279,6 +1447,8 @@ class MacroDialog(QDialog):
                 tab.set_data(dates, values, note)
                 if series_id == _BUFFETT_ID:
                     self._update_buffett_hint(values)
+                if series_id in _MANUAL_IDS and values:
+                    tab.set_hint('', '')
                 return
 
     def _update_buffett_hint(self, values):
@@ -1286,6 +1456,42 @@ class MacroDialog(QDialog):
         text, warning = buffett_hint(latest)
         color = '#ef5350' if warning else _TXT
         self._buffett_tab.set_hint(text, color)
+
+    def _show_manual_prompt(self, name, prompt):
+        """Copy an export prompt to the clipboard and show it."""
+        QApplication.clipboard().setText(prompt)
+        QMessageBox.information(
+            self, name,
+            'Промт для выгрузки данных скопирован в буфер обмена.\n'
+            'Вставьте его в ассистент, сохраните ответ в файл CSV и нажмите '
+            '«Load».\n\n' + prompt)
+
+    def _load_manual_csv(self, series_id, tab, name):
+        """Pick a CSV exported via the prompt and plot + cache the series."""
+        if tab is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Загрузить {} (CSV)'.format(name), '',
+            'CSV (*.csv);;All files (*)')
+        if not path:
+            return
+        try:
+            dates, values = _parse_ism_csv(path)
+        except Exception as e:  # noqa: BLE001 - file read failure
+            QMessageBox.warning(self, name,
+                                'Не удалось прочитать файл:\n{}'.format(e))
+            return
+        if not dates:
+            QMessageBox.warning(
+                self, name,
+                'Не найдено ни одной строки в формате date,value '
+                '(дата YYYY-MM-DD).')
+            return
+        _save_cached(series_id, dates, values)
+        note = '{:,} points, {}..{}'.format(
+            len(values), dates[0].isoformat(), dates[-1].isoformat())
+        tab.set_data(dates, values, note)
+        tab.set_hint('', '')
 
     def _show_goat(self, advice):
         """Show the goat with `advice` (long enough to read), or hide it."""
@@ -1334,7 +1540,9 @@ class MacroDialog(QDialog):
     def _load_all(self):
         self.reloadButton.setEnabled(False)
         self._late_data = {}
-        loaders = {_BUFFETT_ID: _load_buffett}
+        loaders = {_BUFFETT_ID: _load_buffett,
+                   _ISM_ID: _load_ism,
+                   _ISM_SERVICES_ID: _load_ism}
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
         items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
