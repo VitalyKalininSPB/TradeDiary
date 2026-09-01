@@ -1,6 +1,7 @@
 # This Python file uses the following encoding: utf-8
 import sys
 import os
+import logging
 
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -9,35 +10,17 @@ from qt_loader import loadUi
 
 from EditDealDialog import EditDealDialog
 
-
-from xml.dom.minidom import parse
-import xml.dom.minidom
-
 from DealDialog import DealDialog
-from DealDialog import Deal
 from DealDialog import DirectionType
 from DealDialog import FutureUtil
-from DealDialog import trade_system_name
 
-import requests, zipfile, io
+from deals import Deal, Direction, trade_system_name
+from persistence import load as load_diary, save as save_diary
+import risk
 import markets
 import price_history
 
-# ---------------------------------------------------------------------------
-# TODO(потом в GUI): константы позиционной риска. Пока захардкожены, вынести в настройки.
-# Модель риска: масштабируется от корреляции портфеля (см. корреляционный термометр).
-# Bасис 2% в "хорошей" зоне (+0.35..+0.55); при концентрации риск режется, при
-# диверсификации повышается. Список — (верхняя граница корреляции, риск на позицию),
-# упорядочен по убыванию корреляции; выбирается ПОСЛЕДВИЙ интервал, в который попадает corr.
-RISK_BY_CORR = [          # TODO(в GUI): заменить на редактируемую таблицу
-    (1.00, 0.010),        # > +0.70 — высокая концентрация: самые низкий риск
-    (0.70, 0.015),        # +0.55..+0.70 — повышенный риск
-    (0.55, 0.020),        # +0.35..+0.55 — "хорошая" зона: BАСИС 2%
-    (0.35, 0.020),        # +0.20..+0.35 — нейтрально
-    (0.20, 0.025),        # <= +0.20 — сверхдиверсифицировано: можно больше
-]
-RR = 2.0                  # TODO(в GUI): соотношение TP:SL (1:2)
-# ---------------------------------------------------------------------------
+log = logging.getLogger(__name__)
 
 class TableModel(QtCore.QAbstractTableModel):
 
@@ -57,27 +40,33 @@ class TableModel(QtCore.QAbstractTableModel):
             'Candles', \
             'Delete']
 
+    # Имена атрибутов Deal для колонок 0..11 (12/13/14 — кнопки).
+    _COL_ATTRS = ['ticker', 'stock_price', 'amount', 'open_date', 'init_price',
+                  'take_profit', 'stop_loss', 'trade_system', 'result',
+                  'close_date', 'whats_next', 'notes']
+
     def __init__(self, data):
         super(TableModel, self).__init__()
         self._data = data
 
     def data(self, index, role):
+        deal = self._data[index.row()]
+        col = index.column()
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            col = index.column()
             if col == 7:
-                return trade_system_name(self._data[index.row()][col])
+                return trade_system_name(deal.trade_system)
             if col in (12, 13, 14):
                 return ''
-            return self._data[index.row()][col]
+            return getattr(deal, self._COL_ATTRS[col])
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
-            if (self._data[index.row()][4] > self._data[index.row()][1]):
+            if deal.init_price > deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(42, 106, 64))
-            elif (self._data[index.row()][4] < self._data[index.row()][1]):
+            elif deal.init_price < deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(140, 46, 46))
             else:
                 return QtGui.QBrush(QtGui.QColor(28, 29, 34))
         if role == QtCore.Qt.ItemDataRole.ForegroundRole:
-            if (self._data[index.row()][4] != self._data[index.row()][1]):
+            if deal.init_price != deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(255, 255, 255))
 
     def setData(self, data):
@@ -227,7 +216,7 @@ class TradeDiary(QtWidgets.QMainWindow):
     def __init__(self):
         super(TradeDiary, self).__init__()
         self.load_ui()
-        print("UI loaded")
+        log.info("UI loaded")
         self.read_data()
         self.model = TableModel(self.data)
         self.tradeTableView.setModel(self.model)
@@ -316,11 +305,11 @@ class TradeDiary(QtWidgets.QMainWindow):
     def openTickers(self):
         """Return {ticker: currency} of currently open portfolio positions."""
         out = {}
-        for row in self.data:
-            if row[9]:
+        for deal in self.data:
+            if deal.close_date:
                 continue
-            ticker = row[0].strip()
-            currency = row[12].strip() or markets.USD
+            ticker = deal.ticker.strip()
+            currency = deal.currency.strip() or markets.USD
             if ticker:
                 out[ticker] = currency
         return out
@@ -367,14 +356,11 @@ class TradeDiary(QtWidgets.QMainWindow):
         usd = {}
         for ticker, currency in assets.items():
             value = 0.0
-            for row in self.data:
-                if row[0].strip() != ticker:
+            for deal in self.data:
+                if deal.ticker.strip() != ticker:
                     continue
-                try:
-                    amount = float(row[2] or 0)
-                    price = float(row[1] or 0)
-                except ValueError:
-                    continue
+                amount = deal.amount
+                price = deal.stock_price
                 if currency == markets.RUB:
                     rate = markets.fetch_usd_rate()
                     value += price * amount / rate if rate else 0.0
@@ -616,56 +602,20 @@ class TradeDiary(QtWidgets.QMainWindow):
         v.addLayout(bottom)
 
     def read_data(self):
-        DOMTree = xml.dom.minidom.parse("diary.xml")
-        collection = DOMTree.documentElement
-
-        self.data = []
-        self.base_balance = 0.0
+        self.data, self.base_balance = load_diary()
         self.holdings_usd = 0.0
-
-        balance = collection.getElementsByTagName("balance")
-        for b in balance:
-            try:
-                self.base_balance = float(b.getAttribute('value') or 0)
-            except ValueError:
-                self.base_balance = 0.0
-
-        deals = collection.getElementsByTagName("deal")
-        for deal in deals:
-            print('Deal')
-            print(deal)
-
-            print("Ticker: " + deal.getAttribute('ticker'))
-
-            row = [deal.getAttribute('ticker'),\
-                    deal.getAttribute('stockPrice'), \
-                    deal.getAttribute('stocksAmount'), \
-                    deal.getAttribute('openDate'), \
-                    deal.getAttribute('initPrice'), \
-                    deal.getAttribute('takeProfit'), \
-                    deal.getAttribute('stopLoss'), \
-                    deal.getAttribute('tradeSystem'), \
-                    deal.getAttribute('result'), \
-                    deal.getAttribute('closeDate'), \
-                    deal.getAttribute('whatsNext'), \
-                    deal.getAttribute('analysisNotes'), \
-                    deal.getAttribute('currency')]
-            self.data.append(row)
 
     def recalcBalance(self):
         self.holdings_usd = 0.0
         rate = markets.fetch_usd_rate()
-        for row in self.data:
-            currency = row[12]
+        for deal in self.data:
+            currency = deal.currency
             if currency not in (markets.RUB, markets.USD):
                 continue
-            if row[9]:
+            if deal.close_date:
                 continue
-            try:
-                amount = float(row[2] or 0)
-                price = float(row[1] or 0)
-            except ValueError:
-                continue
+            amount = deal.amount
+            price = deal.stock_price
             if amount <= 0 or price <= 0:
                 continue
             if currency == markets.RUB:
@@ -694,7 +644,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.updateBalanceDisplay()
 
     def closeEvent(self,event):
-        print("Close event")
+        log.info("Close event")
         t = getattr(self, '_macroThread', None)
         if t is not None and t.isRunning():
             t.wait(5000)
@@ -702,76 +652,45 @@ class TradeDiary(QtWidgets.QMainWindow):
             self._goat.close()
             self._goat.deleteLater()
 
-        doc = xml.dom.minidom.parseString("<diary/>")
-        root = doc.documentElement
-
-        balance = doc.createElement("balance")
-        balance.setAttribute("value", str(self.base_balance))
-        root.appendChild(balance)
-
-        for row in self.data:
-            print('Stock Price for save: ' + str(row[1]))
-            print('Init Price for save: ' + str(row[4]))
-            deal = doc.createElement("deal")
-            deal.setAttribute("ticker", row[0])
-            deal.setAttribute("stockPrice", str(row[1]))
-            deal.setAttribute("stocksAmount", str(row[2]))
-            deal.setAttribute("openDate", row[3])
-            deal.setAttribute("initPrice", str(row[4]))
-            deal.setAttribute("takeProfit", str(row[5]))
-            deal.setAttribute("stopLoss", str(row[6]))
-            deal.setAttribute("tradeSystem", str(row[7]))
-            deal.setAttribute("result", row[8])
-            deal.setAttribute("closeDate", row[9])
-            deal.setAttribute("whatsNext", row[10])
-            deal.setAttribute("analysisNotes", row[11])
-            deal.setAttribute("currency", row[12])
-            root.appendChild(deal)
-
-        #print(doc.toprettyxml())
-        doc.writexml( open('diary.xml', 'w'),
-                      indent="  ",
-                      addindent="  ",
-                      newl='\n')
-
+        save_diary(self.data, self.base_balance)
         event.accept()
 
     def longClicked(self):
-        print("Long clicked")
+        log.info("Long clicked")
         dlg = DealDialog()
         dlg.setData(self.balanceUsd())
         dlg.setMode(DirectionType.BUY)
         if dlg.exec():
-            print("Success!")
+            log.info("Success!")
             deal = dlg.makeDeal()
             self.debitLong(deal)
-            self.data.append(deal.toArray())
+            self.data.append(deal)
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
         else:
-            print("Cancel!")
+            log.info("Cancel!")
 
     def debitLong(self, deal):
         cost_usd = None
         if deal.currency == markets.RUB:
             rate = markets.fetch_usd_rate()
             if rate:
-                cost_usd = deal.stockPrice * deal.stocksAmount / rate
+                cost_usd = deal.stock_price * deal.amount / rate
         elif deal.currency == markets.USD:
-            cost_usd = deal.stockPrice * deal.stocksAmount
+            cost_usd = deal.stock_price * deal.amount
         if cost_usd is not None:
             self.base_balance -= cost_usd
 
     def shortClicked(self):
-        print("Short clicked")
+        log.info("Short clicked")
         dlg = DealDialog()
         dlg.setData(self.balanceUsd())
         dlg.setMode(DirectionType.SELL)
         if dlg.exec():
-            print("Success!")
+            log.info("Success!")
             deal = dlg.makeDeal()
-            self.data.append(deal.toArray())
+            self.data.append(deal)
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
@@ -800,7 +719,7 @@ class TradeDiary(QtWidgets.QMainWindow):
     def deleteClicked(self, row):
         if row < 0 or row >= len(self.data):
             return
-        ticker = str(self.data[row][0] or '') or 'deal'
+        ticker = self.data[row].ticker or 'deal'
         ret = QtWidgets.QMessageBox.question(
             self.window(), 'Delete deal',
             'Delete this deal ({} )?'.format(ticker),
@@ -815,96 +734,54 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.refreshCorrelation()
 
     def editClicked(self, item):
-        print("Edit clicked " + str(item.row()))
+        log.info("Edit clicked %s", item.row())
+        deal = self.data[item.row()]
         dlg = EditDealDialog()
-        dlg.setData(self.data[item.row()], self.balanceUsd())
+        dlg.setData(deal, self.balanceUsd())
         if dlg.exec():
-            print("Success!")
-            self.data[item.row()][1] = dlg.priceEdit.text()
-            self.data[item.row()][7] = dlg.tradesystemList.currentIndex()
-            self.data[item.row()][9] = dlg.closeDateLabel.text()
-            self.data[item.row()][10] = dlg.whatsNextEdit.toPlainText()
-            self.data[item.row()][11] = dlg.notesEdit.toPlainText()
+            log.info("Success!")
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
 
     def _riskPercentForCorr(self, corr):
-        """Risk per position (%) for the current portfolio correlation.
-
-        Selects the highest interval in RISK_BY_CORR whose upper bound is >= corr,
-        i.e. the band the correlation currently falls into.
-        TODO(в GUI): этот подбор инф-полем можно перенести в настройки.
-        """
-        for bound, risk in RISK_BY_CORR:
-            if corr <= bound:
-                return risk
-        return RISK_BY_CORR[-1][1]
-
-    def _dealDirection(self, row):
-        """Infer long/short for a deal row. Direction is not stored in the model.
-
-        TODO(в GUI): добавить явное поле direction; пока infer:
-          1) по заданному SL (row[6]); 2) иначе по TP (row[5]); 3) иначе Long.
-        Returns 'LONG' or 'SHORT'.
-        """
-        try:
-            price = float(row[1] or 0)
-        except ValueError:
-            price = 0.0
-
-        def _num(idx):
-            try:
-                return float(row[idx] or 0)
-            except ValueError:
-                return 0.0
-
-        sl = _num(6)
-        if sl != 0:
-            return 'SHORT' if sl > price else 'LONG'
-        tp = _num(5)
-        if tp != 0:
-            return 'SHORT' if tp < price else 'LONG'
-        return 'LONG'
+        return risk.risk_pct_for_corr(corr)
 
     def _groupOpenStocks(self):
         """Group open (unclosed) stock positions by ticker.
 
         Returns a dict ticker -> account with:
-          amount      : summed shares across rows
-          weightedPrice: price blended across rows (by amount)
+          amount       : summed shares across deals
+          weightedPrice: price blended across deals (by amount)
           currency     : currency of the ticker
-          rows         : list of open data rows belonging to the ticker
+          direction    : deal direction (LONG/SHORT)
+          rows         : list of open deals belonging to the ticker
           skipped      : reason string if the group could not be processed
-        Rows with invalid/non-positive data are collected together (their ticker
-        is skipped, reason preserved). Futures are skipped (TODO: pointPrice).
+        Deals with non-positive data are collected together (their ticker is
+        skipped, reason preserved). Futures are skipped (TODO: pointPrice).
         """
         groups = {}
-        for row in self.data:
-            if row[9]:                      # закрытая сделка — пропускаем
+        for deal in self.data:
+            if deal.close_date:                      # закрытая сделка — пропускаем
                 continue
-            ticker = row[0].strip()
+            ticker = deal.ticker.strip()
             if FutureUtil.is_future(self._fakeDeal(ticker)):
                 groups.setdefault(ticker, {}).setdefault('skipped',
                     'фьючерс, пока не поддерживается')
                 continue
-            try:
-                price = float(row[1] or 0)
-                amount = float(row[2] or 0)
-            except ValueError:
-                groups.setdefault(ticker, {}).setdefault('skipped',
-                    'нечисловые данные')
-                continue
+            price = deal.stock_price
+            amount = deal.amount
             if amount <= 0 or price <= 0:
                 groups.setdefault(ticker, {}).setdefault('skipped',
                     'amount/price <= 0')
                 continue
             g = groups.setdefault(ticker, {'amount': 0.0,
                                            'weightedPrice': 0.0,
-                                           'currency': row[12].strip(),
+                                           'currency': deal.currency.strip(),
+                                           'direction': deal.direction,
                                            'rows': []})
             g['amount'] += amount
             g['weightedPrice'] += price * amount
-            g['rows'].append(row)
+            g['rows'].append(deal)
         # Взвешенная по объёму цена по каждому тикеру.
         for g in groups.values():
             if g.get('amount', 0) > 0:
@@ -914,13 +791,13 @@ class TradeDiary(QtWidgets.QMainWindow):
     def recalcSlTpClicked(self):
         """Recalculate recommended SL/TP for every open position (by TICKER).
 
-        All open rows of the same ticker are aggregated into one position, so a
-        single 2%-style risk budget is applied per ticker rather than per row
+        All open deals of the same ticker are aggregated into one position, so a
+        single 2%-style risk budget is applied per ticker rather than per deal
         (no duplicated risk for multiple entries of the same asset). TP is RR:1
         of the resulting risk distance; the computed SL/TP is written back to
-        every open row of that ticker.
+        every open deal of that ticker.
         TODO(в GUI): продумать распределение СОВОКУПНОГО риска между разными
-        тикерами; явное поле direction; фьючерсы (pointPrice) пока не поддерживаются.
+        тикерами; фьючерсы (pointPrice) пока не поддерживаются.
         """
         assets = self.openTickers()
         if not assets:
@@ -963,18 +840,18 @@ class TradeDiary(QtWidgets.QMainWindow):
             amount = g['amount']
             price = g['weightedPrice']
             risk_per_stock = budget_local / amount
-            direction = self._dealDirection(g['rows'][0])
-            if direction == 'LONG':
+            direction = g['direction']
+            if direction == Direction.LONG:
                 sl = price - risk_per_stock
-                tp = price + RR * risk_per_stock
+                tp = price + risk.RR * risk_per_stock
             else:
                 sl = price + risk_per_stock
-                tp = price - RR * risk_per_stock
+                tp = price - risk.RR * risk_per_stock
 
-            # Пишем одинаковые SL/TP во все открытые строки этого тикера.
-            for row in g['rows']:
-                row[6] = self._priceStr(sl)
-                row[5] = self._priceStr(tp)
+            # Пишем одинаковые SL/TP во все открытые сделки этого тикера.
+            for deal in g['rows']:
+                deal.stop_loss = sl
+                deal.take_profit = tp
             changed_tickers.append(ticker)
 
         self.tradeTableView.model().layoutChanged.emit()
@@ -1015,14 +892,13 @@ class TradeDiary(QtWidgets.QMainWindow):
         TODO(в GUI): убрать генерацию, когда появится настоящая история.
         """
         from deal_history import DealHistoryDialog, generate_fake_history
-        open_rows = [r for r in self.data if not r[9]]
-        history = self.data + generate_fake_history(open_rows)
+        open_deals = [d for d in self.data if d.is_open]
+        history = self.data + generate_fake_history(open_deals)
         dlg = DealHistoryDialog(history, self)
         dlg.exec()
 
     def _fakeDeal(self, ticker):
         """Minimal Deal-compatible object so FutureUtil can inspect the ticker."""
-        from DealDialog import Deal
         d = Deal()
         d.ticker = ticker
         return d
@@ -1033,23 +909,11 @@ class TradeDiary(QtWidgets.QMainWindow):
         return '{:.2f}'.format(value)
 
     def updatePricesClicked(self):
-        print("Update prices")
-        url = 'https://iss.moex.com/iss/downloads/statistics/engines/stock/currentprices/currentprices_main_2023-02-15.xml.zip'
-        r = requests.get(url)
-        z = zipfile.ZipFile(io.BytesIO(r.content))
-        z.extractall("tmp")
-        DOMTree = xml.dom.minidom.parse("tmp/currentprices_main_latest.xml")
-        collection = DOMTree.documentElement
-
-        currentStocks = {'ALRS':0, 'AFKS':0}
-        rows = collection.getElementsByTagName("row")
-        for name in currentStocks.keys():
-            for row in rows:
-                if row.hasAttribute('SECID') and row.getAttribute('SECID') == name:
-                    currentStocks[name] = row.getAttribute('CURPRICE')
-
-        print('RES:')
-        print(currentStocks)
+        log.warning("Update prices: устаревший обработчик (URL 2023 г.) — отключён")
+        QtWidgets.QMessageBox.information(
+            self.window(), 'Update prices',
+            'Автообновление котировок временно отключено (устаревшая загрузка). '
+            'Цены подтягиваются автоматически при добавлении тикера.')
 
 
 DARK_QSS = """
@@ -1082,6 +946,7 @@ QToolTip { background-color: #26272e; color: #e6e6ea; border: 1px solid #43464f;
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
     app = QApplication([])
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_QSS)

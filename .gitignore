@@ -3,3 +3,6 @@ __pycache__/
 .qtcreator/
 *.db
 opencode.json
+diary.xml
+diary.xml.migrated
+assets/advice_goat.png

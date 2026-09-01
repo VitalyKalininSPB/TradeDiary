@@ -1,5 +1,18 @@
 # -*- coding: utf-8 -*-
+import os
+
 from urllib.parse import quote_plus
+
+
+# Картинка козы. Ищем в repo `assets/`, затем — пользовательский Downloads.
+_ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+_GOAT_CANDIDATES = [
+    os.path.join(_ASSET_DIR, 'advice_goat.png'),
+    '/home/vitaly/Downloads/advice_goat.png',
+]
+GOAT_IMAGE = next((p for p in _GOAT_CANDIDATES if os.path.exists(p)), '')
+if not GOAT_IMAGE:
+    GOAT_IMAGE = _GOAT_CANDIDATES[0]
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, QRectF, QRect, QPoint, QTimer, Signal
@@ -13,11 +26,7 @@ try:
 except Exception:  # pragma: no cover - fallback
     QWebEngineView = None
 
-GOAT_IMAGE = '/home/vitaly/Downloads/advice_goat.png'
-
 STAGES = ['Management Operation Plan (MOP)', 'KPI', 'Board of directors']
-
-GOAT_IMAGE = '/home/vitaly/Downloads/advice_goat.png'
 
 
 class GoatAssistant(QWidget):

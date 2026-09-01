@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from PySide6 import QtCore, QtGui, QtWidgets
 from qt_loader import loadUi
 
-from DealDialog import Deal
+from deals import Deal
 
 from enum import Enum
 from datetime import datetime
@@ -19,30 +19,30 @@ class EditDealDialog(QDialog):
         self.closeDealButton.clicked.connect(self.closeDealClicked)
 
 
-    def setData(self, data, balance):
+    def setData(self, deal, balance):
         self._balance = balance
 
-        self.deal = Deal.fromArray(data)
+        self.deal = deal
         self.ticketEdit.setText(self.deal.ticker)
-        self.initpriceEdit.setText(str(self.deal.initPrice))
-        self.priceEdit.setText(str(self.deal.stockPrice))
-        self.priceEdit.setEnabled(not self.deal.closeDate)
-        self.amountEdit.setText(str(self.deal.stocksAmount))
-        self.openDateLabel.setText(self.deal.openDate)
-        self.closeDateLabel.setText(self.deal.closeDate)
-        self.takeprofitEdit.setText(str(self.deal.takeProfit))
-        self.stoplossEdit.setText(str(self.deal.stopLoss))
+        self.initpriceEdit.setText(str(self.deal.init_price))
+        self.priceEdit.setText(str(self.deal.stock_price))
+        self.priceEdit.setEnabled(not self.deal.close_date)
+        self.amountEdit.setText(str(self.deal.amount))
+        self.openDateLabel.setText(self.deal.open_date)
+        self.closeDateLabel.setText(self.deal.close_date)
+        self.takeprofitEdit.setText(str(self.deal.take_profit))
+        self.stoplossEdit.setText(str(self.deal.stop_loss))
         try:
-            idx = int(self.deal.tradeSystem or 0)
+            idx = int(self.deal.trade_system or 0)
         except (TypeError, ValueError):
             idx = 0
         self.tradesystemList.setCurrentIndex(idx)
-        if not self.deal.closeDate:
+        if not self.deal.close_date:
             self.tradesystemList.setEnabled(True)
-        self.whatsNextEdit.setText(self.deal.whatsNext)
-        self.notesEdit.setText(self.deal.analysisNotes)
+        self.whatsNextEdit.setText(self.deal.whats_next)
+        self.notesEdit.setText(self.deal.notes)
 
-        if not self.deal.closeDate:
+        if not self.deal.close_date:
             self.closeDealButton.setEnabled(True)
         else:
             self.closeDealButton.setEnabled(False)
@@ -51,6 +51,11 @@ class EditDealDialog(QDialog):
 
     def okPressed(self):
         print('Accept')
+        self.deal.stock_price = float(self.priceEdit.text()) if self.priceEdit.text() else self.deal.stock_price
+        self.deal.trade_system = self.tradesystemList.currentIndex()
+        self.deal.close_date = self.closeDateLabel.text()
+        self.deal.whats_next = self.whatsNextEdit.toPlainText()
+        self.deal.notes = self.notesEdit.toPlainText()
         self.accept()
 
     def cancelPressed(self):
@@ -61,4 +66,5 @@ class EditDealDialog(QDialog):
         print('Accept')
         closeDate = datetime.now()
         self.closeDateLabel.setText(closeDate.strftime("%d/%m/%Y %H:%M"))
+        self.deal.close_date = self.closeDateLabel.text()
         self.accept()

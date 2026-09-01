@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-import seaborn as sns
 import matplotlib
 matplotlib.use('QtAgg')
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -22,21 +20,31 @@ class CorrelationDialog(QDialog):
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
         ax.set_facecolor('#1e1f24')
-        sns.heatmap(np.asarray(corr_matrix, dtype=float), annot=True, fmt='.2f',
-                    cmap='coolwarm', vmin=-1, vmax=1, square=True,
-                    xticklabels=tickers, yticklabels=tickers, ax=ax,
-                    cbar_kws={'label': 'daily return correlation'})
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
-        ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+
+        matrix = np.asarray(corr_matrix, dtype=float)
+        im = ax.imshow(matrix, cmap='coolwarm', vmin=-1, vmax=1, aspect='equal')
+        ax.set_xticks(range(len(tickers)))
+        ax.set_yticks(range(len(tickers)))
+        ax.set_xticklabels(tickers, rotation=45, ha='right')
+        ax.set_yticklabels(tickers, rotation=0)
         ax.set_title('Pairwise correlation (portfolio: {:.2f})'.format(portfolio_corr),
                      color='#dcdce0')
         ax.tick_params(colors='#dcdce0')
-        for side in ('bottom', 'left', 'top', 'right'):
-            ax.spines[side].set_color('#43464f')
-        cbar = ax.collections[0].colorbar
+
+        # Числа в ячейках (annotate вручную, как в seaborn heatmap).
+        for i in range(len(tickers)):
+            for j in range(len(tickers)):
+                val = matrix[i, j]
+                if not np.isfinite(val):
+                    continue
+                # Цвет текста: тёмный на светлых краях, светлый в тёмной середине.
+                color = '#111' if abs(val) < 0.55 else '#eee'
+                ax.text(j, i, '{:.2f}'.format(val), ha='center', va='center',
+                        color=color, fontsize=9)
+
+        cbar = fig.colorbar(im, ax=ax, label='daily return correlation')
         cbar.ax.tick_params(colors='#dcdce0')
-        if cbar.ax.get_ylabel():
-            cbar.ax.set_ylabel(cbar.ax.get_ylabel(), color='#dcdce0')
+        cbar.ax.set_ylabel('daily return correlation', color='#dcdce0')
 
         layout = QVBoxLayout(self)
         layout.addWidget(canvas)

@@ -1,44 +1,41 @@
 # -*- coding: utf-8 -*-
 import random
+import datetime
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
 from PySide6.QtCore import Qt
 
-import DealDialog
+from deals import Deal, Direction, TRADE_SYSTEMS, trade_system_name
 
 
 def _fmt_date(d):
     return d.strftime("%d/%m/%Y")
 
 
-def generate_fake_history(open_rows, per_ticker=3):
+def generate_fake_history(open_deals, per_ticker=3):
     """Derive fictional CLOSED deals from the current open positions.
 
     Used so the Deal History window has content even before real trades exist.
     TODO(в GUI): убрать, когда появится настоящая история сделок.
-    Returns a list of rows matching the main data schema (13 fields).
+    Returns a list of Deal objects.
     """
     random.seed()
-    systems = list(range(len(DealDialog.TRADE_SYSTEMS)))
+    systems = list(range(len(TRADE_SYSTEMS)))
     results = [('Win', 1), ('Loss', -1), ('Win', 1), ('Loss', -1), ('BE', 0)]
     lookback_days = [15, 25, 40, 60, 90]
     out = []
 
-    for row in open_rows:
-        ticker = str(row[0] or '')
-        currency = str(row[12] or '')
-        try:
-            base_price = float(row[4] or 0) or float(row[1] or 0)
-        except (ValueError, TypeError):
-            base_price = 0.0
+    for deal in open_deals:
+        ticker = deal.ticker
+        currency = deal.currency
+        base_price = deal.init_price or deal.stock_price
         if base_price <= 0 or not ticker:
             continue
 
         for _ in range(per_ticker):
             hold_days = random.choice(lookback_days)
-            # Уходим в прошлое от "сегодня" (признак дат не критичен — это фейк).
-            open_dt = __import__('datetime').date.today() - __import__('datetime').timedelta(days=hold_days + random.randint(0, 15))
-            close_dt = open_dt + __import__('datetime').timedelta(days=hold_days)
-            drift = random.uniform(-0.06, 0.06)     # итоговая доходность сделки
+            open_dt = datetime.date.today() - datetime.timedelta(days=hold_days + random.randint(0, 15))
+            close_dt = open_dt + datetime.timedelta(days=hold_days)
+            drift = random.uniform(-0.06, 0.06)
             close_price = round(base_price * (1 + drift), 2)
             stop = round(base_price * 0.97, 2)
             target = round(base_price * 1.06, 2)
@@ -49,21 +46,20 @@ def generate_fake_history(open_rows, per_ticker=3):
             else:
                 close_price = round(base_price * (1 + sign * random.uniform(0.01, 0.05)), 2)
 
-            fake = [ticker,                          # 0 ticker
-                    str(close_price),                # 1 price
-                    str(amount),                     # 2 amount
-                    _fmt_date(open_dt),              # 3 openDate
-                    str(base_price),                 # 4 initPrice
-                    str(target),                     # 5 TP
-                    str(stop),                       # 6 SL
-                    random.choice(systems),          # 7 system
-                    res,                             # 8 result
-                    _fmt_date(close_dt),             # 9 closeDate
-                    '',                              # 10 whatsNext
-                    '',                              # 11 notes
-                    currency,                        # 12 currency
-                    ]
-            out.append(fake)
+            out.append(Deal(
+                ticker=ticker,
+                stock_price=close_price,
+                amount=float(amount),
+                open_date=_fmt_date(open_dt),
+                init_price=base_price,
+                take_profit=target,
+                stop_loss=stop,
+                trade_system=random.choice(systems),
+                result=res,
+                close_date=_fmt_date(close_dt),
+                currency=currency,
+                direction=deal.direction,
+            ))
     return out
 
 
@@ -85,7 +81,7 @@ class DealHistoryDialog(QDialog):
         ('Notes', 200),
     ]
 
-    def __init__(self, rows, parent=None):
+    def __init__(self, deals, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Deal History')
         self.resize(1150, 500)
@@ -95,28 +91,29 @@ class DealHistoryDialog(QDialog):
         headers = [c[0] for c in self.COLUMNS]
         widths = [c[1] for c in self.COLUMNS]
 
-        table = QTableWidget(len(rows), len(headers), self)
+        table = QTableWidget(len(deals), len(headers), self)
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
 
-        for r, row in enumerate(rows):
-            status, direction = self._rowMeta(row)
+        for r, deal in enumerate(deals):
+            status = 'CLOSED' if deal.close_date else 'OPEN'
+            direction = 'S' if deal.direction == Direction.SHORT else 'L'
             values = [
-                str(row[0] or ''),                                      # Ticker
-                direction,                                              # Dir
-                str(row[1] or ''),                                      # Price
-                str(row[2] or ''),                                      # Amount
-                str(row[12] or ''),                                     # Currency
-                str(row[3] or ''),                                      # Open
-                str(row[9] or '-'),                                     # Close
-                str(row[5] or ''),                                      # TP
-                str(row[6] or ''),                                      # SL
-                str(row[8] or ''),                                      # Result
-                DealDialog.trade_system_name(row[7]),                   # System
-                str(row[11] or ''),                                     # Notes
+                deal.ticker,
+                direction,
+                str(deal.stock_price),
+                str(deal.amount),
+                deal.currency,
+                deal.open_date,
+                deal.close_date or '-',
+                str(deal.take_profit),
+                str(deal.stop_loss),
+                deal.result,
+                trade_system_name(deal.trade_system),
+                deal.notes,
             ]
             for c, val in enumerate(values):
                 item = QTableWidgetItem(val)
@@ -127,29 +124,3 @@ class DealHistoryDialog(QDialog):
         for i, w in enumerate(widths):
             table.setColumnWidth(i, w)
         layout.addWidget(table)
-
-    def _rowMeta(self, row):
-        """Return (status, direction) for a deal row. Direction is inferred.
-
-        TODO(в GUI): добавлять явное поле direction в модель; пока копия логики
-        из main.recalcSlTpClicked (_dealDirection).
-        """
-        def _num(idx):
-            try:
-                return float(row[idx] or 0)
-            except (ValueError, TypeError, IndexError):
-                return 0.0
-
-        try:
-            price = float(row[1] or 0)
-        except (ValueError, TypeError):
-            price = 0.0
-
-        status = 'OPEN' if not (row[9] if len(row) > 9 else '') else 'CLOSED'
-        sl = _num(6)
-        if sl:
-            direction = 'S' if sl > price else 'L'
-        else:
-            tp = _num(5)
-            direction = 'S' if tp and tp < price else 'L'
-        return status, direction

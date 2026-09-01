@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+import logging
+import threading
+import time
+
 import requests
 
 RUB = 'RUB'
@@ -10,31 +14,40 @@ WORLD = 'WORLD'
 
 _UA = {'User-Agent': 'Mozilla/5.0'}
 
+log = logging.getLogger(__name__)
 
-def _fetch_usd_rate_cached():
-    if not hasattr(_fetch_usd_rate_cached, 'rate'):
-        _fetch_usd_rate_cached.rate = None
-        try:
-            r = requests.get(
-                'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
-                timeout=5)
-            r.raise_for_status()
-            data = r.json()
-            rows = data.get('marketdata', {}).get('data', [])
-            cols = data.get('marketdata', {}).get('columns', [])
-            if rows and 'LAST' in cols:
-                last_idx = cols.index('LAST')
-                for row in rows:
-                    if row[last_idx] is not None:
-                        _fetch_usd_rate_cached.rate = float(row[last_idx])
-                        break
-        except Exception as e:
-            print('Failed to fetch USD/RUB rate: ' + str(e))
-    return _fetch_usd_rate_cached.rate
+# Кэш курса USD/RUB с TTL и блокировкой (не «навсегда», как было раньше).
+USD_TTL_SECONDS = 300
+_rate = None
+_rate_at = 0.0
+_rate_lock = threading.Lock()
 
 
-def fetch_usd_rate():
-    return _fetch_usd_rate_cached()
+def fetch_usd_rate(ttl=USD_TTL_SECONDS):
+    """Курс USD/RUB из кэша с TTL; при промахе — сеть, при ошибке — последний известный."""
+    global _rate, _rate_at
+    with _rate_lock:
+        if _rate and time.time() - _rate_at < ttl:
+            return _rate
+    try:
+        r = requests.get(
+            'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
+            timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get('marketdata', {}).get('data', [])
+        cols = data.get('marketdata', {}).get('columns', [])
+        if rows and 'LAST' in cols:
+            last_idx = cols.index('LAST')
+            for row in rows:
+                if row[last_idx] is not None:
+                    with _rate_lock:
+                        _rate = float(row[last_idx])
+                        _rate_at = time.time()
+                    return _rate
+    except Exception as e:
+        log.warning('Failed to fetch USD/RUB rate: %s', e)
+    return _rate
 
 
 def fetch_moex_price(ticker):
@@ -51,7 +64,7 @@ def fetch_moex_price(ticker):
                 if row[last_idx] is not None:
                     return float(row[last_idx])
     except Exception as e:
-        print('Failed to fetch MOEX price for ' + ticker + ': ' + str(e))
+        log.warning('Failed to fetch MOEX price for %s: %s', ticker, e)
     return None
 
 
@@ -68,7 +81,7 @@ def _fetch_yahoo_price(ticker):
                 if price is not None:
                     return float(price)
         except Exception as e:
-            print('Yahoo {} failed for {}: {}'.format(host, ticker, e))
+            log.warning('Yahoo %s failed for %s: %s', host, ticker, e)
     return None
 
 
@@ -83,7 +96,7 @@ def _fetch_stooq_price(ticker):
             if value not in ('N/D', ''):
                 return float(value)
     except Exception as e:
-        print('Stooq failed for {}: {}'.format(ticker, e))
+        log.warning('Stooq failed for %s: %s', ticker, e)
     return None
 
 

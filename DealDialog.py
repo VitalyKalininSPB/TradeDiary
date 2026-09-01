@@ -7,6 +7,8 @@ from qt_loader import loadUi
 from enum import Enum
 from datetime import datetime
 from dataclasses import dataclass
+
+from deals import Deal, Direction, TRADE_SYSTEMS, trade_system_name
 import markets
 import logo
 
@@ -14,65 +16,13 @@ class DirectionType(Enum):
     BUY = 1
     SELL = 2
 
-TRADE_SYSTEMS = ['Average MA', 'MACD']
-
-
-def trade_system_name(value):
-    """Human-readable name for a stored tradeSystem index."""
-    try:
-        idx = int(value or 0)
-    except (TypeError, ValueError):
-        idx = 0
-    if 0 <= idx < len(TRADE_SYSTEMS):
-        return TRADE_SYSTEMS[idx]
-    return TRADE_SYSTEMS[0]
-
-class Deal:
-    ticker = ''
-    stockPrice = 0
-    stocksAmount = 0
-    openDate = ''
-    initPrice = 0
-    takeProfit = 0
-    stopLoss = 0
-    tradeSystem = 0
-    result = 0
-    closeDate = ''
-    whatsNext = ''
-    analysisNotes = ''
-    currency = ''
-    unit = 'pt'
-
-    def toArray(self):
-        row = [self.ticker, self.stockPrice, self.stocksAmount, self.openDate,
-               self.initPrice, self.takeProfit, self.stopLoss, self.tradeSystem,
-               self.result, self.closeDate, self.whatsNext, self.analysisNotes,
-               self.currency]
-        return row
-
-    @staticmethod
-    def fromArray(array):
-        deal = Deal()
-        deal.ticker = array[0]
-        deal.stockPrice = array[1]
-        deal.stocksAmount = array[2]
-        deal.openDate = array[3]
-        deal.initPrice = array[4]
-        deal.takeProfit = array[5]
-        deal.stopLoss = array[6]
-        deal.tradeSystem = array[7]
-        deal.result = array[8]
-        deal.closeDate = array[9]
-        deal.whatsNext = array[10]
-        deal.analysisNotes = array[11]
-        deal.currency = array[12] if len(array) > 12 else ''
-        return deal
+# Совместимость: TRADE_SYSTEMS / trade_system_name теперь живут в deals.py;
+# оставляем алиасы, чтобы внешние импорты не падали (см. DealDialog.py выше).
 
 @dataclass
 class FutureInfo:
     ticker: str = ''
     pointPrice: float = 0.0
-
 
 class FutureUtil(object):
 
@@ -104,13 +54,13 @@ class RiskManager:
     def checkRisk(self):
 
         if FutureUtil.is_future(self.deal):
-            riskPerStock = FutureUtil.convert(self.deal.ticker, self.deal.stockPrice-self.deal.stopLoss)
+            riskPerStock = FutureUtil.convert(self.deal.ticker, self.deal.stock_price-self.deal.stop_loss)
         else:
-            riskPerStock = self.deal.stockPrice-self.deal.stopLoss
+            riskPerStock = self.deal.stock_price-self.deal.stop_loss
 
         print("Risk per stock:" + str(riskPerStock))
         print("Maximum risk:" + str(self.balance * 0.02))
-        if riskPerStock*self.deal.stocksAmount > self.balance * 0.02:
+        if riskPerStock*self.deal.amount > self.balance * 0.02:
             self.warning = 'Risk is exceeded 2% of balance'
             return False
         else:
@@ -121,6 +71,7 @@ class DealDialog(QDialog):
     def __init__(self):
         super().__init__()
         loadUi("deal.ui", self)
+        self._direction = Direction.LONG
         self.logoLabel.setFixedSize(48, 48)
         self.logoLabel.setVisible(True)
         self.buttonBox_2.accepted.connect(self.okPressed)
@@ -144,23 +95,26 @@ class DealDialog(QDialog):
 
     def setMode(self, mode):
         if mode == DirectionType.BUY:
+            self._direction = Direction.LONG
             self.label_5.setText('Stop Loss (<=):')
             self.label_6.setText('Take Profit (>=):')
         else:
+            self._direction = Direction.SHORT
             self.label_5.setText('Stop Loss (>=):')
             self.label_6.setText('Take Profit (<=):')
 
     def makeDeal(self):
         deal = Deal()
         deal.ticker = self.ticketEdit.text()
-        deal.stockPrice = float( self.priceEdit.text() ) if self.priceEdit.text() else 0
-        deal.initPrice = float( self.priceEdit.text() ) if self.priceEdit.text() else 0
-        deal.stocksAmount = float( self.amountEdit.text() ) if self.amountEdit.text() else 0
-        deal.stopLoss = float( self.stoplossEdit.text() ) if self.stoplossEdit.text() else 0
-        deal.takeProfit = float( self.takeprofitEdit.text() ) if self.takeprofitEdit.text() else 0
-        deal.openDate = self.openDateLabel.text()
+        deal.stock_price = float(self.priceEdit.text()) if self.priceEdit.text() else 0
+        deal.init_price = float(self.priceEdit.text()) if self.priceEdit.text() else 0
+        deal.amount = float(self.amountEdit.text()) if self.amountEdit.text() else 0
+        deal.stop_loss = float(self.stoplossEdit.text()) if self.stoplossEdit.text() else 0
+        deal.take_profit = float(self.takeprofitEdit.text()) if self.takeprofitEdit.text() else 0
+        deal.open_date = self.openDateLabel.text()
         deal.currency = getattr(self, '_currency', '') or ''
-        deal.tradeSystem = self.comboBox.currentIndex() if hasattr(self, 'comboBox') else 0
+        deal.trade_system = self.comboBox.currentIndex() if hasattr(self, 'comboBox') else 0
+        deal.direction = self._direction
         return deal
 
     def okPressed(self):
@@ -225,7 +179,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stockPrice)))
+            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stock_price)))
             return 'Future'
         ticker = self.ticketEdit.text().strip()
         if not ticker:
@@ -248,7 +202,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stockPrice)) + ' RUB')
+            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stock_price)) + ' RUB')
             return 'Future'
         return 'Stock'
 
@@ -256,7 +210,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.stopLossRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stopLoss)) + ' RUB')
+            self.stopLossRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stop_loss)) + ' RUB')
             return 'Future'
         return 'Stock'
 
@@ -264,6 +218,6 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.takeProfitRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.takeProfit)) + ' RUB')
+            self.takeProfitRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.take_profit)) + ' RUB')
             return 'Future'
         return 'Stock'

@@ -8,11 +8,14 @@ import os
 import sqlite3
 import datetime
 import time
+import logging
 import requests
 
 import numpy as np
 
 import markets
+
+log = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'price_history.db')
 
@@ -148,7 +151,7 @@ def _fetch_yahoo_history(ticker, ndays):
     for t, c in zip(ts, closes):
         if c is None:
             continue
-        d = datetime.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d')
+        d = datetime.datetime.fromtimestamp(t, datetime.UTC).strftime('%Y-%m-%d')
         out[d] = float(c)
     return _drop_today(out)
 
@@ -178,7 +181,7 @@ def fetch_history(ticker, currency, ndays=CHART_DAYS):
     try:
         return _fetch_yahoo_history(ticker, ndays)
     except Exception as e:
-        print('Yahoo history failed for {}: {}; trying stooq'.format(ticker, e))
+        log.warning('Yahoo history failed for %s: %s; trying stooq', ticker, e)
         return _fetch_stooq_history(ticker, ndays)
 
 
@@ -194,7 +197,7 @@ def ensure_history(ticker, currency, want_days=CHART_DAYS):
     try:
         fetched = fetch_history(ticker, currency, want_days)
     except Exception as e:
-        print('Failed to fetch history for {}: {}'.format(ticker, e))
+        log.warning('Failed to fetch history for %s: %s', ticker, e)
         return
     if fetched:
         save_prices(ticker, fetched.items(), keep=CHART_DAYS)
@@ -231,7 +234,7 @@ def _fetch_yahoo_ohlc(ticker, ndays):
     for t, o, h, l, c in zip(ts, quote['open'], quote['high'], quote['low'], quote['close']):
         if c is None:
             continue
-        d = datetime.datetime.utcfromtimestamp(t).strftime('%Y-%m-%d')
+        d = datetime.datetime.fromtimestamp(t, datetime.UTC).strftime('%Y-%m-%d')
         out[d] = (float(o or c), float(h or c), float(l or c), float(c))
     return _drop_today_ohlc(out)
 
@@ -262,7 +265,7 @@ def fetch_ohlc(ticker, currency, ndays=CHART_DAYS):
     try:
         return _fetch_yahoo_ohlc(ticker, ndays)
     except Exception as e:
-        print('Yahoo OHLC failed for {}: {}; trying stooq'.format(ticker, e))
+        log.warning('Yahoo OHLC failed for %s: %s; trying stooq', ticker, e)
         return _fetch_stooq_ohlc(ticker, ndays)
 
 
@@ -300,7 +303,7 @@ def ensure_ohlc(ticker, currency, want_days=CHART_DAYS):
     try:
         fetched = fetch_ohlc(ticker, currency, want_days)
     except Exception as e:
-        print('Failed to fetch OHLC for {}: {}'.format(ticker, e))
+        log.warning('Failed to fetch OHLC for %s: %s', ticker, e)
         return
     if fetched:
         save_ohlc(ticker, fetched.items(), keep=CHART_DAYS)
