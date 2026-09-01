@@ -1193,7 +1193,24 @@ class MacroDialog(QDialog):
             ordered.append((title, tab))
             self._widgets.append(tab)
 
-        # 8. Buffett indicator.
+        # 8. ISM Manufacturing PMI — данные недоступны (FRED убрал ISM в 2016,
+        # зеркало DBnomics не обновляется с 08.2025, сайт ISM закрыт — 403).
+        ism = QWidget(self)
+        ism_layout = QVBoxLayout(ism)
+        ism_layout.setContentsMargins(16, 16, 16, 16)
+        ism_label = QLabel(
+            'ISM Manufacturing PMI — данные недоступны.\n'
+            'Бесплатного машинного источника нет: FRED убрал ISM в 2016, '
+            'зеркало DBnomics перестало обновляться (последнее значение '
+            '08.2025), сайт ISM закрыт для автоматического доступа (403).')
+        ism_label.setWordWrap(True)
+        ism_label.setStyleSheet('color: #ef9a9a; font-weight: bold;')
+        ism_layout.addStretch(1)
+        ism_layout.addWidget(ism_label)
+        ism_layout.addStretch(1)
+        ordered.append(('ISM Manufacturing PMI', ism))
+
+        # 9. Buffett indicator.
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
             'Соотношение капитализации американского рынка к ВВП', self)
