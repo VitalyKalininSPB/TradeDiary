@@ -29,6 +29,11 @@ _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
             'Forward P/E', 'EPS growth %', 'Rel Momentum 1M', 'Rel Momentum 1Y',
             'Company Score', 'Research status']
 
+# Коза для одной компании показывается не более 2 раз за запуск приложения
+# (иначе информационный перегруз). Счётчик в памяти — сбрасывается при рестарте.
+_GOAT_LIMIT = 2
+_GOAT_SHOWN = {}
+
 
 class _CompanyDataThread(QtCore.QThread):
     """Обновление живых метрик компаний (не чаще раза в день) в фоне."""
@@ -174,14 +179,16 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         self._fill(self.shortTable, short_rows, '_short_rank', short=True)
         self._long_rows = long_rows
         self._short_rows = short_rows
-        self._show_company_detail(long_rows[0] if long_rows else None)
+        self._show_company_detail(long_rows[0] if long_rows else None,
+                                  from_click=False)
 
     def _on_company_clicked(self, table, item):
         rows = self._long_rows if table is self.longTable else self._short_rows
         row = item.row()
         if 0 <= row < len(rows):
             self._show_company_detail(rows[row],
-                                      short=table is self.shortTable)
+                                      short=table is self.shortTable,
+                                      from_click=True)
 
     def _sector_context(self):
         try:
@@ -194,7 +201,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 return s
         return None
 
-    def _show_company_detail(self, s, short=False):
+    def _show_company_detail(self, s, short=False, from_click=False):
         if s is None:
             self.detail.setPlainText('')
             self.qualButton.setEnabled(False)
@@ -207,10 +214,10 @@ class CompanyScreenDialog(QtWidgets.QDialog):
 
         lines.append('Почему попала в shortlist:')
         margin = s.get('net_margin')
-        median = s.get('sector_median_margin')
-        if margin is not None and median is not None:
-            lines.append('• Net Margin: {:.1f}%, {} медианы {}'.format(
-                margin, 'выше' if margin >= median else 'ниже', self._sector))
+        pct_margin = s.get('pct_margin')
+        if margin is not None and pct_margin is not None:
+            lines.append('• Net Margin: {:.1f}% — выше {:.0f}% компаний '
+                         '{}'.format(margin, pct_margin, self._sector))
         elif margin is not None:
             lines.append('• Net Margin: {:.1f}%'.format(margin))
         else:
@@ -225,10 +232,10 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         lines.append('• Relative Momentum 1Y: {:+.1f} п.п.'.format(r1y)
                      if r1y is not None else '• Relative Momentum 1Y: -')
         pe = s.get('forward_pe')
-        median_pe = s.get('sector_median_pe')
-        if pe is not None and median_pe:
-            lines.append('• Forward P/E: {:.1f}×, {} медианы {}'.format(
-                pe, 'ниже' if pe <= median_pe else 'выше', self._sector))
+        pct_pe = s.get('pct_pe')
+        if pe is not None and pct_pe is not None:
+            lines.append('• Forward P/E: {:.1f}× — дешевле {:.0f}% компаний '
+                         '{}'.format(pe, 100 - pct_pe, self._sector))
         elif pe is not None:
             lines.append('• Forward P/E: {:.1f}×'.format(pe))
         else:
@@ -239,6 +246,19 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         score = s.get('score_rounded')
         lines.append('• Company Score: {:+.2f}'.format(score)
                      if score is not None else '• Company Score: -')
+
+        contribs = s.get('contribs') or []
+        if contribs:
+            lines.append('')
+            lines.append('Компоненты score:')
+            lines.append('  ' + ' · '.join(
+                '{} {:+.2f}'.format(n, v) for n, v in contribs))
+        flags = s.get('flags') or []
+        if flags:
+            lines.append('')
+            lines.append('Флаги:')
+            for f in flags:
+                lines.append('  • {}'.format(f))
 
         lines.append('')
         lines.append('Контекст:')
@@ -254,6 +274,25 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         lines.append('Запустить Qualitative Assessment.')
         self.detail.setPlainText('\n'.join(lines))
         self.qualButton.setEnabled(True)
+        if not from_click:
+            return
+        flags = s.get('flags') or []
+        if flags or label == company_quant.LABEL_RESEARCH_PRIORITY:
+            ticker = s.get('ticker') or ''
+            shown = _GOAT_SHOWN.get(ticker, 0)
+            if shown < _GOAT_LIMIT:
+                _GOAT_SHOWN[ticker] = shown + 1
+                self._show_goat(self._company_goat_text(s, short))
+
+    def _company_goat_text(self, s, short=False):
+        label = s.get('label', company_quant.LABEL_INSUFFICIENT)
+        title = (_LABEL_SHORT_RU if short else _LABEL_RU).get(label, label)
+        ticker = s.get('ticker') or s.get('company') or ''
+        flags = s.get('flags') or []
+        head = '{} — {}.'.format(ticker, title)
+        if flags:
+            return head + ' Обратите внимание: ' + '; '.join(flags[:3])
+        return head
 
     def _open_qualitative(self):
         table = self.tabs.currentWidget()
@@ -299,6 +338,15 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                     if warnings:
                         tip += '\n' + '\n'.join(warnings)
                     item.setToolTip(tip)
+                elif c == 5:
+                    item.setForeground(self._color_vs(
+                        s.get('forward_pe'), s.get('sector_median_pe'),
+                        lower_better=True))
+                elif c == 6:
+                    item.setForeground(self._color_vs(
+                        s.get('eps_growth'),
+                        s.get('sector_median_eps_growth'),
+                        lower_better=False))
                 elif c in (4, 5, 6, 7, 8, 9):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
@@ -355,6 +403,14 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         if value is None:
             return '-'
         return '{:.1f}×'.format(value)
+
+    @staticmethod
+    def _color_vs(value, median, lower_better):
+        """Зелёный, если значение лучше медианы сектора, красный — если хуже."""
+        if value is None or median is None:
+            return QtGui.QColor(_TXT)
+        good = (value <= median) if lower_better else (value >= median)
+        return QtGui.QColor('#81c784' if good else '#ef5350')
 
     def _show_goat(self, advice):
         from qualitative_dialog import GoatAssistant

@@ -63,6 +63,54 @@ def _label(score):
     return LABEL_LOW_PRIORITY
 
 
+def _percentile(v, values):
+    """Процентиль значения v среди выборки (0..100), None при отсутствии."""
+    present = [x for x in values if x is not None]
+    if v is None or not present:
+        return None
+    less = sum(1 for x in present if x < v)
+    eq = sum(1 for x in present if x == v)
+    return (less + 0.5 * eq) / len(present) * 100.0
+
+
+def _flags(e):
+    """Авто-предупреждения из связей метрик (простым языком, без отчётов)."""
+    out = []
+    yoy = e.get('net_margin_yoy')
+    if yoy is not None and yoy < -1:
+        out.append('Маржинальность падает за год (YoY {:+.1f} п.п.)'.format(yoy))
+    pct_pe = e.get('pct_pe')
+    if pct_pe is not None and pct_pe > 70:
+        out.append('Оценка выше большинства компаний сектора '
+                   '(Forward P/E {:.1f}×)'.format(e.get('forward_pe')))
+    if (yoy is not None and yoy > 0
+            and e.get('rel_momentum_1m') is not None
+            and e['rel_momentum_1m'] < 0):
+        out.append('Маржа растёт, но цена за месяц её не поддерживает')
+    if e.get('rel_momentum_1y') is not None and e['rel_momentum_1y'] < -20:
+        out.append('Слабая динамика цены за год '
+                   '(Rel Momentum 1Y {:+.1f} п.п.)'.format(e['rel_momentum_1y']))
+    if (pct_pe is not None and pct_pe > 60
+            and e.get('rel_momentum_1y') is not None
+            and e['rel_momentum_1y'] < 0):
+        out.append('Дорогой и слабый: высокая оценка при отрицательном momentum')
+    return out
+
+
+def _contribs(e):
+    """Вклад каждой компоненты в score (веса нормализованы)."""
+    parts = [('Рентабельность', W_RP, e.get('relative_profitability')),
+             ('Momentum', W_MOM, e.get('momentum'))]
+    if e.get('margin_trend') is not None:
+        parts.append(('Тренд маржи', W_TREND, e['margin_trend']))
+    if e.get('valuation') is not None:
+        parts.append(('Оценка', W_VAL, e['valuation']))
+    used = sum(w for _n, w, _v in parts)
+    if not used:
+        return []
+    return [(n, (w / used) * v) for n, w, v in parts if v is not None]
+
+
 def rank_companies(companies):
     """Rank companies within each sector.
 
@@ -123,9 +171,12 @@ def _rank_sector(sector, companies):
     median = sorted(margins)[len(margins) // 2] if margins else None
     pes = [e['forward_pe'] for e in rankable if e['forward_pe']]
     median_pe = sorted(pes)[len(pes) // 2] if pes else None
+    epsg = [e['eps_growth'] for e in rankable if e['eps_growth'] is not None]
+    median_epsg = sorted(epsg)[len(epsg) // 2] if epsg else None
     for e in rankable:
         e['sector_median_margin'] = median
         e['sector_median_pe'] = median_pe
+        e['sector_median_eps_growth'] = median_epsg
         rp = math.tanh((e['net_margin'] - avg) / 10.0)
         rel1m = e['return_1m'] - e['benchmark_1m']
         rel1y = e['return_1y'] - e['benchmark_1y']
@@ -152,6 +203,17 @@ def _rank_sector(sector, companies):
         e['company_score'] = score
         e['score_rounded'] = round(score, 2) if score is not None else None
         e['label'] = _label(score)
+    margin_vals = [e['net_margin'] for e in rankable]
+    pe_vals = [e['forward_pe'] for e in rankable]
+    mom1m_vals = [e['rel_momentum_1m'] for e in rankable]
+    mom1y_vals = [e['rel_momentum_1y'] for e in rankable]
+    for e in rankable:
+        e['pct_margin'] = _percentile(e['net_margin'], margin_vals)
+        e['pct_pe'] = _percentile(e['forward_pe'], pe_vals)
+        e['pct_mom_1m'] = _percentile(e['rel_momentum_1m'], mom1m_vals)
+        e['pct_mom_1y'] = _percentile(e['rel_momentum_1y'], mom1y_vals)
+        e['flags'] = _flags(e)
+        e['contribs'] = _contribs(e)
     ranked = sorted([e for e in rankable if e['company_score'] is not None],
                     key=lambda e: e['company_score'], reverse=True)
     for i, e in enumerate(ranked, start=1):
