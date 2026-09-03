@@ -114,6 +114,9 @@ class Ui_TradeDiary(object):
         self.qualitativeAssessmentButton = QPushButton(self.centralwidget)
         self.qualitativeAssessmentButton.setObjectName(u"qualitativeAssessmentButton")
         self.qualitativeAssessmentButton.setGeometry(QRect(180, 622, 150, 25))
+        self.watchlistButton = QPushButton(self.centralwidget)
+        self.watchlistButton.setObjectName(u"watchlistButton")
+        self.watchlistButton.setGeometry(QRect(340, 622, 120, 25))
         TradeDiary.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(TradeDiary)
         self.menubar.setObjectName(u"menubar")
@@ -151,5 +154,6 @@ class Ui_TradeDiary(object):
         self.clearDbButton.setText(QCoreApplication.translate("TradeDiary", u"Clear DB", None))
         self.quantitiveAssessmentButton.setText(QCoreApplication.translate("TradeDiary", u"Quant. Assessment", None))
         self.qualitativeAssessmentButton.setText(QCoreApplication.translate("TradeDiary", u"Qual. Assessment", None))
+        self.watchlistButton.setText(QCoreApplication.translate("TradeDiary", u"Watchlist", None))
     # retranslateUi
 

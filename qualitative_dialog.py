@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import html
 import os
 
 from urllib.parse import quote_plus
@@ -130,9 +129,8 @@ ANALYST_PROMPT = """Проанализируй Research Analyst Estimates, Targe
 
 Не используй target price как самостоятельный сигнал к покупке. Указывай источники и даты."""
 
-# Промты для стадий Qualitative Assessment. Длинный русский текст не помещается
-# в URL Google-поиска (кириллица кодируется в 4–6 раз длиннее, лимит ~2048
-# символов), поэтому такие стадии показывают копируемый текст в webview.
+# Промты для стадий Qualitative Assessment. Подставляются как полный запрос
+# Google-поиска при переходе на стадию.
 STAGE_PROMPTS = {
     0: ('MOP', MOP_PROMPT),
     1: ('KPI', KPI_PROMPT),
@@ -141,29 +139,6 @@ STAGE_PROMPTS = {
     4: ('Insider Stock & Option Ownership', INSIDER_PROMPT),
     5: ('Research Analyst Estimates, Range and Ratings', ANALYST_PROMPT),
 }
-
-_PROMPT_PAGE = """<html><head><meta charset="utf-8"></head>
-<body style="background:#1e1f24;color:#dcdce0;font-family:sans-serif;margin:16px">
-<h2 style="color:#dcdce0">{title} prompt — {ticker}</h2>
-<textarea id="prompt" readonly style="width:100%;height:70vh;background:#26272d;
-color:#dcdce0;border:1px solid #43464f;border-radius:6px;padding:10px;
-font-size:13px;box-sizing:border-box;resize:vertical">{prompt}</textarea><br>
-<button onclick="copy()" style="background:#3a6ea5;color:white;border:none;
-padding:8px 16px;border-radius:6px;cursor:pointer;margin-top:8px">Копировать</button>
-<span id="status" style="color:#8bc34a;margin-left:12px"></span>
-<script>
-function copy() {{
-  var t = document.getElementById('prompt');
-  t.focus();
-  t.select();
-  t.setSelectionRange(0, t.value.length);
-  var ok = false;
-  try {{ ok = document.execCommand('copy'); }} catch (e) {{}}
-  document.getElementById('status').textContent =
-      ok ? 'Скопировано!' : 'Выделите текст вручную (Ctrl+C)';
-}}
-</script>
-</body></html>"""
 
 
 class GoatAssistant(QWidget):
@@ -371,6 +346,7 @@ class QualitativeAssessmentDialog(QDialog):
         self.showMaximized()
 
         self._current_stage = -1
+        self._assessment_started = False
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
 
@@ -383,7 +359,7 @@ class QualitativeAssessmentDialog(QDialog):
         self._build_webview(root)
         self._build_bottom(root)
 
-        self.beginButton.clicked.connect(self._begin_assessment)
+        self.beginButton.clicked.connect(self._on_begin_button)
         self.nextButton.clicked.connect(self._next_stage)
         self.nextButton.setEnabled(False)
         self.notesButton.clicked.connect(self._open_notes)
@@ -452,12 +428,35 @@ class QualitativeAssessmentDialog(QDialog):
         if 0 <= self._current_stage < len(STAGES):
             self._ratings[self._current_stage] = value
 
+    def _on_begin_button(self):
+        if self._assessment_started:
+            self._add_to_watchlist()
+        else:
+            self._begin_assessment()
+
+    def _add_to_watchlist(self):
+        from watchlist import add as watchlist_add
+        ticker = self._ticker or ''
+        if watchlist_add(ticker):
+            self.beginButton.setText('Added to Watchlist')
+            self.beginButton.setEnabled(False)
+            QtWidgets.QMessageBox.information(
+                self, 'Watchlist',
+                '{} добавлен в watchlist.'.format(ticker.upper()))
+        else:
+            QtWidgets.QMessageBox.information(
+                self, 'Watchlist',
+                '{} уже в watchlist или тикер пустой.'.format(ticker.upper() or 'N/A'))
+
     def _begin_assessment(self):
         self._ticker = self.tickerEdit.text().strip()
         self._plans_list = self._plans(self._ticker or 'stock')
         self._current_stage = -1
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
+        self._assessment_started = True
+        self.beginButton.setText('Add to Watchlist')
+        self.beginButton.setEnabled(False)
         self.nextButton.setEnabled(True)
         self.notesButton.setEnabled(True)
         self.starRating.setEnabled(True)
@@ -514,6 +513,7 @@ class QualitativeAssessmentDialog(QDialog):
             self.nextButton.setEnabled(False)
             self.nextButton.setText('Next')
             self.scale.mark_all_done()
+            self.beginButton.setEnabled(True)
             if QWebEngineView is not None:
                 self.webView.setHtml(self._stats_html())
             self._show_goat()
@@ -521,20 +521,11 @@ class QualitativeAssessmentDialog(QDialog):
         self.scale.set_stage(self._current_stage)
         self.starRating.setRating(0)
         query = self._plans_list[self._current_stage]
+        if self._current_stage in STAGE_PROMPTS:
+            _, prompt = STAGE_PROMPTS[self._current_stage]
+            query = prompt.replace('[ТИКЕР]', self._ticker or 'N/A')
         self.nextButton.setText(
             'Finish' if self._current_stage == len(STAGES) - 1 else 'Next')
-        if self._current_stage in STAGE_PROMPTS:
-            title, prompt = STAGE_PROMPTS[self._current_stage]
-            ticker = self._ticker or 'N/A'
-            prompt = prompt.replace('[ТИКЕР]', ticker)
-            page = _PROMPT_PAGE.format(title=html.escape(title),
-                                       ticker=html.escape(ticker),
-                                       prompt=html.escape(prompt))
-            if QWebEngineView is not None:
-                self.webView.setHtml(page)
-            else:
-                self.webView.setText(prompt)
-            return
         if QWebEngineView is not None:
             url = 'https://www.google.com/search?q=' + quote_plus(query) + '&udm=50'
             self.webView.load(url)
