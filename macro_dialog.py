@@ -28,6 +28,7 @@ from yield_curve import YIELD_CURVE_SERIES, _YieldCurveTab, compute_ntfs_series
 from credit_spread import CreditSpreadTab
 from vix_tab import VixTab
 from mlrci import MlrcTab, compute_mlrci, compute_net_liquidity
+import nfib
 
 from matplotlib.collections import PolyCollection
 
@@ -69,6 +70,10 @@ INDICATORS = [
                  'за 2–3 квартала до того, как прибыль на акцию (EPS) компаний '
                  'S&P 500 начнёт падать. Если ВВП показывает стагнацию прибылей '
                  'в экономике — это сигнал к будущей распродаже на рынке акций.'),
+    ('PERMIT',   'Building Permits (PERMIT)', 'Building Permits',
+                 'Thousands of Units',  '#80cbc4',
+                 'Разрешения на строительство жилья (Census Bureau) — опережающий '
+                 'индикатор жилищного сектора и состояния экономики'),
 ]
 
 # Buffett indicator = market value of US corporate equities / nominal GDP.
@@ -123,8 +128,52 @@ def _build_ism_prompt(name, context, period='2000-01-01'):
 _ISM_PROMPT = _build_ism_prompt(_ISM_NAME, 'в обрабатывающей промышленности США')
 _ISM_SERVICES_PROMPT = _build_ism_prompt(_ISM_SERVICES_NAME, 'в сфере услуг США')
 
+
+def _build_nfib_prompt(period='2000-01-01'):
+    """Prompt to dump the NFIB leading components as a multi-column CSV.
+
+    NFIB (Small Business Economic Trends) has no free machine source, so the
+    assistant emits date + 6 forward-looking component columns; the user saves
+    the block and imports it through the tab's Load button.
+    """
+    return (
+        'Ты — эксперт по опросу малого бизнеса NFIB (Small Business Economic '
+        'Trends, США).\n\n'
+        'Задача: выгрузить ПОЛНЫЙ исторический ряд 6 ОПЕРЕЖАЮЩИХ компонентов '
+        'индекса оптимизма NFIB одним CSV-блоком. Никаких пояснений, '
+        'вступлений или «...».\n\n'
+        'Формат — одна строка на месяц, разделитель запятая, первая строка — '
+        'заголовок:\n'
+        'date,exp_sales,exp_cond,job_plans,capex,inv_plans,expand\n'
+        '{period},26,38,19,28,2,22\n\n'
+        'Колонки (диффузионные индексы, net %, выше = оптимизм):\n'
+        '1. exp_sales — % ожидающих роста продаж (следующие 3 мес)\n'
+        '2. exp_cond — % ожидающих улучшения деловых условий (следующие 6 мес)\n'
+        '3. job_plans — % планирующих нанимать (следующие 3 мес)\n'
+        '4. capex — % планирующих капзатраты (следующие 3–6 мес)\n'
+        '5. inv_plans — % планирующих рост запасов (следующие 3–6 мес)\n'
+        '6. expand — % считающих, что сейчас хорошее время расширяться\n\n'
+        'Требования:\n'
+        '1. date — ISO YYYY-MM-DD, первый день месяца.\n'
+        '2. Значения — одно десятичное через точку (или NA, если не '
+        'подтверждено); все 6 колонок обязательны.\n'
+        '3. Период: с {period} по последний опубликованный месяц; без пропусков.\n'
+        '4. Источник — официальные сезонно скорректированные данные NFIB; сверь '
+        'по нескольким источникам.\n'
+        '5. Если ответ не помещается целиком — продолжай в следующем сообщении '
+        'с точного места обрыва, не повторяя уже выданные строки.\n'
+        '6. Не выдумывай значения: неподтверждённое → NA (строку с датой всё '
+        'равно оставь).\n\n'
+        'Верни ТОЛЬКО CSV-блок.'
+    ).format(period=period)
+
+
+_NFIB_ID = 'NFIB_COMPOSITE'
+_NFIB_NAME = 'NFIB Composite (leading indicators)'
+_NFIB_PROMPT = _build_nfib_prompt()
+
 # Series that have no machine source and are imported manually (Load button).
-_MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID)
+_MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID, _NFIB_ID)
 
 # Cleveland Fed ex-ante (expected) real interest rate, 10-year horizon. A
 # model-based real rate (nominal yields minus model-implied expected inflation,
@@ -266,6 +315,44 @@ def _parse_ism_csv(path):
         dates = [dates[i] for i in order]
         values = [values[i] for i in order]
     return dates, values
+
+
+def _parse_nfib_csv(path):
+    """Parse a multi-column `date,comp1..comp6` CSV into (dates, cols dict).
+
+    The first row may be a header; value columns follow nfib.COMPONENTS order.
+    Missing/non-numeric values (NA, nan) become NaN so the composite chart
+    shows a gap instead of a bogus point.
+    """
+    col_names = [name for _label, name in nfib.COMPONENTS]
+    dates = []
+    cols = {name: [] for name in col_names}
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        for raw in csv.reader(f):
+            if not raw or len(raw) < 2:
+                continue
+            d_raw = raw[0].strip()
+            try:
+                d = datetime.date.fromisoformat(d_raw)
+            except ValueError:
+                continue  # header row or unparseable date
+            row = []
+            for c in raw[1:len(col_names) + 1]:
+                v_raw = c.strip().replace(',', '').replace('%', '')
+                try:
+                    row.append(float(v_raw))
+                except ValueError:
+                    row.append(float('nan'))
+            while len(row) < len(col_names):
+                row.append(float('nan'))
+            dates.append(d)
+            for name, v in zip(col_names, row):
+                cols[name].append(v)
+    if dates:
+        order = sorted(range(len(dates)), key=lambda i: dates[i])
+        dates = [dates[i] for i in order]
+        cols = {name: [v[i] for i in order] for name, v in cols.items()}
+    return dates, cols
 
 
 def _load_ntfs(series_id):
@@ -690,6 +777,8 @@ class _IndicatorTab(QWidget):
         self._on_manual_load = None   # () -> None, plugged by caller for the Load button
         self._on_show_prompt = None   # () -> None, plugged by the Prompt button
         self._hline = None   # y-value for a horizontal reference line (e.g. 50 for PMI)
+        self._hlines = None  # list of y-values for several reference lines
+        self._zones = None   # list of (lo, hi, color) horizontal bands
 
         self._dates = []
         self._values = []
@@ -725,13 +814,13 @@ class _IndicatorTab(QWidget):
         if show_load_button:
             self.loadButton = QPushButton('Load')
             self.loadButton.setToolTip(
-                'Загрузить ISM Manufacturing PMI из CSV, выгруженного '
-                'ассистентом (кнопка «Промт»).')
+                'Загрузить данные из CSV, выгруженного ассистентом '
+                '(кнопка «Промт»).')
             self.loadButton.clicked.connect(self._on_load_button)
             bar.addWidget(self.loadButton)
             self.promptButton = QPushButton('Промт')
             self.promptButton.setToolTip(
-                'Скопировать в буфер обмена промт для выгрузки ISM PMI.')
+                'Скопировать в буфер обмена промт для выгрузки данных.')
             self.promptButton.clicked.connect(self._on_prompt_button)
             bar.addWidget(self.promptButton)
         root.addLayout(bar)
@@ -883,10 +972,15 @@ class _IndicatorTab(QWidget):
 
         self._draw_pivots(ax)
 
-        if self._hline is not None:
-            ax.axhline(self._hline, color='#90a4ae', linewidth=1.0,
+        if self._zones:
+            for lo, hi, color in self._zones:
+                ax.axhspan(lo, hi, color=color, alpha=0.12, zorder=0)
+        levels = (self._hlines if self._hlines else
+                  ([self._hline] if self._hline is not None else []))
+        for level in levels:
+            ax.axhline(level, color='#90a4ae', linewidth=1.0,
                        linestyle='--', alpha=0.85)
-            ax.text(0.006, self._hline, '  {}'.format(self._hline),
+            ax.text(0.006, level, '  {}'.format(level),
                     transform=ax.get_yaxis_transform(), color=_TXT,
                     fontsize=8, va='center')
 
@@ -1060,6 +1154,106 @@ class _IndicatorTab(QWidget):
                     'стагнирует или падает.')
 
         return ''
+
+    def permits_advice(self):
+        """Goat text for the Building Permits tab, or ''.
+
+        Permits lead the housing cycle, historically the earliest recession
+        precursor. Frame the impact for S&P 500 / NASDAQ rather than
+        homebuilders: regimes on YoY growth g and its 3-month acceleration
+        accel (same helpers as _gdp_phase).
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        vy = _at_days_ago(self._dates, self._values, _YOY_DAYS)
+        vp = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        vyp = _at_days_ago(self._dates, self._values,
+                           _YOY_DAYS + _MOMENTUM_DAYS)
+        if not all((vy, vp, vyp)) or 0 in (vy, vp, vyp):
+            return ''
+        g = (v / vy - 1.0) * 100.0
+        accel = g - (vp / vyp - 1.0) * 100.0
+
+        if g > 5.0:
+            if accel < -4.0:
+                return ('Разрешения на стройку всё ещё растут, но темп резко '
+                        'падает — жилищный цикл на вершине. S&P 500 получает '
+                        'последнюю поддержку циклических секторов; коррекция '
+                        'цикликов обычно опережает разворот индекса на 3–6 мес. '
+                        'NASDAQ меньше зависит от жилья — за ним следите по '
+                        'ставкам.')
+            return ('Разрешения на стройку уверенно растут (г/г) — жилищный '
+                    'цикл в экспансии, это поддержка для S&P 500: циклические '
+                    'сектора тянут индекс вверх. NASDAQ получает попутный '
+                    'risk-on, пока ставки не растут.')
+        if g < -5.0:
+            if accel > 4.0:
+                return ('Падение разрешений развернулось вверх — рынок '
+                        'закладывает дно жилищного цикла, а следом и дно '
+                        'S&P 500 (горизонт 3–6 мес.). Ожидание снижения ставок '
+                        'ФРС: NASDAQ (длинная дюрация) обычно опережает S&P 500 '
+                        'в этой фазе.')
+            return ('Разрешения на стройку падают (г/г) — исторически самый '
+                    'ранний предвестник рецессии: S&P 500 под давлением в '
+                    'горизонте 6–12 мес. NASDAQ какое-то время держится, но '
+                    'падает следом, если ФРС не спешит снижать ставки.')
+        if accel > 4.0:
+            return ('Разрешения после боковика разворачиваются вверх — лёгкий '
+                    'плюс для S&P 500 (оживление цикликов) и NASDAQ (risk-on '
+                    'и ставки).')
+        if accel < -4.0:
+            return ('Разрешения затухают после боковика — риск охлаждения '
+                    'экономики: циклические сектора S&P 500 ослабнут первыми; '
+                    'NASDAQ устоит, пока ставки не выросли.')
+        return ('Разрешения на стройку в боковике (г/г ~0) — нейтрально для '
+                'индексов: ни риска рецессии, ни импульса роста. Решающие для '
+                'S&P 500 и NASDAQ факторы сейчас — ставки и прибыли.')
+
+    def nfib_advice(self):
+        """Goat text for the NFIB leading-composite tab, or ''.
+
+        The composite z-scores six forward-looking NFIB components and squashes
+        them to [-100..+100] (see nfib.py). Reading is relative to the recent
+        ~5-year baseline: level + momentum, framed for S&P 500 / NASDAQ.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        if v != v:  # NaN
+            return ''
+        mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        d = (v - mo) if mo is not None and mo == mo else None
+
+        if v > 50.0:
+            if d is not None and d < -10.0:
+                return ('Композит опережающих NFIB-компонентов в зоне '
+                        'оптимизма, но резко разворачивается вниз — вершина '
+                        'цикла: циклические сектора S&P 500 ослабнут первыми; '
+                        'NASDAQ переоценится позже, через ставки.')
+            return ('Малый бизнес смотрит вперёд с оптимизмом (найм, капзатраты, '
+                    'запасы, продажи) — экономика в экспансии: поддержка для '
+                    'S&P 500. NASDAQ получает попутный risk-on.')
+        if v < -50.0:
+            if d is not None and d > 10.0:
+                return ('Композит опережающих NFIB-компонентов развернулся вверх '
+                        'с дна — малый бизнес снова нанимает и инвестирует. '
+                        'Дно индексов близко: NASDAQ (длинная дюрация) обычно '
+                        'опережает S&P 500 в этой фазе.')
+            return ('Малый бизнес ждёт ухудшения и сворачивает найм и капзатраты '
+                    '— опережающий сигнал рецессии: S&P 500 под давлением в '
+                    'горизонте 6–12 мес. NASDAQ временно держится, но падает '
+                    'следом, если ФРС не снижает ставки.')
+        if d is not None and d > 10.0:
+            return ('Композит набирает силу — малый бизнес оживает: лёгкий плюс '
+                    'для S&P 500 и NASDAQ (risk-on).')
+        if d is not None and d < -10.0:
+            return ('Композит слабеет — малый бизнес осторожничает: риск '
+                    'охлаждения, циклические сектора S&P 500 ослабнут первыми; '
+                    'NASDAQ устоит, пока ставки не выросли.')
+        return ('Композит в нейтрали — малый бизнес без явного направления. '
+                'Решающие для S&P 500 и NASDAQ факторы сейчас — ставки и '
+                'прибыли.')
 
     # ------------------------------------------------------------------ aside
     def _sync_scrollbar(self):
@@ -1245,6 +1439,8 @@ class MacroDialog(QDialog):
         self.tabs = QTabWidget()
         self._widgets = []
         self._gdp_tab = None
+        self._permits_tab = None
+        self._nfib_tab = None
         self._ism_tab = None
         self._ism_services_tab = None
         # Fixed tab order — build every tab widget first, then add them all in
@@ -1336,6 +1532,8 @@ class MacroDialog(QDialog):
                 continue
             tab = _IndicatorTab(series_id, plot_label, ylabel, color, desc,
                                 self)
+            if series_id == 'PERMIT':
+                self._permits_tab = tab
             ordered.append((title, tab))
             self._widgets.append(tab)
 
@@ -1378,7 +1576,32 @@ class MacroDialog(QDialog):
         self._widgets.append(ism_s)
         ordered.append(('ISM Services PMI', ism_s))
 
-        # 10. Buffett indicator.
+        # 10. NFIB composite of leading survey components — тоже ручной импорт
+        # (FRED не публикует NFIB). Композит z-скорит 6 опережающих компонентов
+        # и сжимает tanh в [-100;+100].
+        nfib_tab = _IndicatorTab(
+            _NFIB_ID, 'NFIB Composite (leading)', 'Composite [-100..+100]',
+            '#4dd0e1',
+            'Композит из 6 опережающих компонентов опроса малого бизнеса NFIB: '
+            'ожидание роста продаж и деловых условий, планы найма, капзатрат и '
+            'запасов, «хорошее время расширяться». Каждый нормирован в '
+            'Z-оценку, среднее сжато tanh в [-100;+100]. Выше +50 — малый '
+            'бизнес смотрит вперёд оптимистично; ниже −50 — сворачивает '
+            'активность.', self,
+            show_load_button=True)
+        nfib_tab._hlines = [-80, 0, 80]
+        nfib_tab._zones = [(80, 100, '#81c784'), (-100, -80, '#ef5350')]
+        nfib_tab.set_manual_loader(
+            lambda: self._load_nfib_csv(_NFIB_ID, nfib_tab, _NFIB_NAME))
+        nfib_tab.set_show_prompt(
+            lambda: self._show_manual_prompt(_NFIB_NAME, _NFIB_PROMPT))
+        nfib_tab.set_hint('Нажмите «Промт» (скопировать запрос в буфер обмена), '
+                          'затем «Load» и выберите выгруженный CSV.', '#ef9a9a')
+        self._nfib_tab = nfib_tab
+        self._widgets.append(nfib_tab)
+        ordered.append(('NFIB Composite (leading)', nfib_tab))
+
+        # 11. Buffett indicator.
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
             'Соотношение капитализации американского рынка к ВВП', self)
@@ -1493,6 +1716,39 @@ class MacroDialog(QDialog):
         tab.set_data(dates, values, note)
         tab.set_hint('', '')
 
+    def _load_nfib_csv(self, series_id, tab, name):
+        """Pick an NFIB CSV (date + 6 component columns) and cache the composite."""
+        if tab is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Загрузить {} (CSV)'.format(name), '',
+            'CSV (*.csv);;All files (*)')
+        if not path:
+            return
+        try:
+            dates, cols = _parse_nfib_csv(path)
+        except Exception as e:  # noqa: BLE001 - file read failure
+            QMessageBox.warning(self, name,
+                                'Не удалось прочитать файл:\n{}'.format(e))
+            return
+        if not dates:
+            QMessageBox.warning(
+                self, name,
+                'Не найдено строк в формате date + 6 колонок компонентов '
+                '(дата YYYY-MM-DD).')
+            return
+        values = nfib.compute_composite(cols)
+        if not values or all(v != v for v in values):
+            QMessageBox.warning(
+                self, name,
+                'Не удалось вычислить композит — нет данных по компонентам.')
+            return
+        _save_cached(series_id, dates, values)
+        note = '{:,} points, {}..{}'.format(
+            len(values), dates[0].isoformat(), dates[-1].isoformat())
+        tab.set_data(dates, values, note)
+        tab.set_hint('', '')
+
     def _show_goat(self, advice):
         """Show the goat with `advice` (long enough to read), or hide it."""
         from qualitative_dialog import GoatAssistant
@@ -1527,6 +1783,10 @@ class MacroDialog(QDialog):
                           'держится — поздний цикл: S&P 500 близок к пику. '
                           'Выходите из Tech и Consumer Discretionary в защиту '
                           '(Utilities, Consumer Staples, Healthcare).')
+        elif widget is self._permits_tab:
+            advice = widget.permits_advice()
+        elif widget is self._nfib_tab:
+            advice = widget.nfib_advice()
         self._show_goat(advice)
 
     def closeEvent(self, event):
@@ -1542,7 +1802,8 @@ class MacroDialog(QDialog):
         self._late_data = {}
         loaders = {_BUFFETT_ID: _load_buffett,
                    _ISM_ID: _load_ism,
-                   _ISM_SERVICES_ID: _load_ism}
+                   _ISM_SERVICES_ID: _load_ism,
+                   _NFIB_ID: _load_ism}
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
         items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
