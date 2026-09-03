@@ -29,6 +29,8 @@ from credit_spread import CreditSpreadTab
 from vix_tab import VixTab
 from mlrci import MlrcTab, compute_mlrci, compute_net_liquidity
 import nfib
+from fomc import FomcTab, load_fomc_statements, unread_count, \
+    refresh_fomc_if_stale
 
 from matplotlib.collections import PolyCollection
 
@@ -140,6 +142,12 @@ _MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID)
 # excluding commodity-price noise and short-term trader panic), published on
 # FRED as a plain series. Its turning points are the Buy/Sell S&P signal tab.
 _REAL_RATE_ID = 'REAINTRATREARAT10Y'
+
+# Net liquidity (WALCL - TGA - RRP): synthetic series built from the Fed's
+# balance sheet (WALCL), the Treasury General Account (WDTGAL) and overnight
+# reverse-repo volume (RRPONTSYD). Unlike M2, this is the pool of reserves
+# that actually feeds risk assets (see AGENTS.md).
+_NETLIQ_ID = 'NETLIQ'
 
 _PERIODS = [('1Y', 365), ('5Y', 5 * 365), ('10Y', 10 * 365), ('Max', None)]
 
@@ -333,6 +341,39 @@ def _load_ntfs(series_id):
     """
     series = {sid: _fred(sid) for sid in ('DTB3', 'DGS6MO', 'DGS1', 'DGS2')}
     return compute_ntfs_series(series)
+
+
+def _load_fomc(series_id):
+    """Refresh the FOMC statement feed (background) and return empty chart data.
+
+    `series_id` is accepted for uniformity with the loader thread. The dialog
+    routes the 'FOMC' row to the FomcTab, which reads the cache.
+    """
+    refresh_fomc_if_stale()
+    return [], []
+
+
+def _load_netliq(series_id=None):
+    """Net liquidity (WALCL - TGA - RRP) as (dates, values in US$ bn), cached.
+
+    `series_id` is accepted for uniformity with _fred (ignored here). The three
+    FRED components are fetched through the cache and combined on WALCL dates by
+    mlrci.compute_net_liquidity (returns US$ m); converted to $ bn for display
+    and cached under _NETLIQ_ID.
+    """
+    cached = _load_cached(_NETLIQ_ID)
+    if cached is not None:
+        return cached
+    from mlrci import _WALCL_ID, _TGA_ID, _RRP_ID
+    series = {sid: _fred(sid) for sid in (_WALCL_ID, _TGA_ID, _RRP_ID)}
+    dates, values = compute_net_liquidity(series)
+    values = [v / 1000.0 for v in values]
+    if dates:
+        try:
+            _save_cached(_NETLIQ_ID, dates, values)
+        except Exception as e:  # noqa: BLE001 - cache write must not fail
+            print('Failed to cache {}: {}'.format(_NETLIQ_ID, e))
+    return dates, values
 
 
 def _load_mlrci(series_id):
@@ -1274,6 +1315,45 @@ class _IndicatorTab(QWidget):
                 '6–12 мес. рискует следовать за настроениями; NASDAQ отскочит '
                 'первым при снижении ставок ФРС.')
 
+    def netliq_advice(self):
+        """Goat text for the Net Liquidity tab, or ''.
+
+        Net liquidity = Fed balance sheet (WALCL) minus the Treasury General
+        Account (WDTGAL) and reverse-repo volume (RRPONTSYD) — the reserve pool
+        that actually feeds risk assets (unlike M2). Reading: level in $bn plus
+        90-day / 1-year change, framed for S&P 500 / NASDAQ.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v_bn = self._values[-1]
+        if v_bn != v_bn:  # NaN
+            return ''
+        mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        yr = _at_days_ago(self._dates, self._values, _YOY_DAYS)
+        d90 = (v_bn - mo) if mo is not None and mo == mo else None
+        d365 = (v_bn - yr) if yr is not None and yr == yr else None
+
+        if d90 is not None and d90 <= -150.0:
+            if d365 is not None and d365 >= 150.0:
+                return ('Чистая ликвидность ФРС (баланс − TGA − RRP) всё ещё '
+                        'выше уровня года назад, но за квартал резко сжалась на '
+                        '{:.0f} млрд $ — резервы уходят (QT / казначейский '
+                        'счёт). S&P 500 без подпитки тормозит, NASDAQ с его '
+                        'длинной дюрацией падает первым.'.format(d90))
+            return ('Чистая ликвидность ФРС сжимается на {:.0f} млрд $ за '
+                    'квартал — деньги высасываются с рынка (QT + TGA). S&P 500 '
+                    'теряет поддержку резервов; NASDAQ реагирует первым из-за '
+                    'длинной дюрации.'.format(d90))
+        if d90 is not None and d90 >= 150.0:
+            return ('Чистая ликвидность ФРС выросла на {:.0f} млрд $ за '
+                    'квартал — резервы снова наполняются (списание TGA / '
+                    'смягчение QT). S&P 500 получает подпитку, NASDAQ обычно '
+                    'растёт первым.'.format(d90))
+        return ('Чистая ликвидность ФРС (баланс − TGA − RRP) на уровне '
+                '{:.0f} млрд $ и за квартал без заметного движения — '
+                'нейтрально. Пока резервы не сжимаются, индексы живут по '
+                'ставкам и прибылям.'.format(v_bn))
+
     # ------------------------------------------------------------------ aside
     def _sync_scrollbar(self):
         if self._data_x0 is None:
@@ -1506,15 +1586,29 @@ class MacroDialog(QDialog):
         self._widgets.append(realrate)
         self._realrate_tab = realrate
 
-        # 3. Yield curve (3M-30Y) with historical snapshots.
+        # 3. Net liquidity (Fed balance sheet - TGA - RRP): the reserve pool
+        # that actually feeds risk assets, unlike M2.
+        netliq = _IndicatorTab(
+            _NETLIQ_ID, 'Net Liquidity (WALCL - TGA - RRP)', 'US$ bn',
+            '#4dd0e1',
+            'Чистая ликвидность ФРС = баланс (WALCL) минус казначейский счёт '
+            '(TGA) и reverse repo (RRP) — именно этот пул резервов реально '
+            'подпитывает рынок акций (в отличие от M2). Рост → risk-on, '
+            'сжатие → риск коррекции. Считается из трёх FRED-серий '
+            'недельно.', self)
+        self._netliq_tab = netliq
+        self._widgets.append(netliq)
+        ordered.append(('Net Liquidity', netliq))
+
+        # 4. Yield curve (3M-30Y) with historical snapshots.
         self._yield_tab = _YieldCurveTab(self)
         ordered.append(('Yield Curve', self._yield_tab))
 
-        # 4. VIX with fear/panic zones.
+        # 5. VIX with fear/panic zones.
         self._vix_tab = VixTab(self)
         ordered.append(('VIX (Volatility)', self._vix_tab))
 
-        # 5-6. Credit spreads: BBB and high-yield.
+        # 6-7. Credit spreads: BBB and high-yield.
         credit = [
             ('BAMLC0A4CBBB', 'BBB Credit Spread (BAMLC0A4CBBB)',
              'BBB corporate credit spread', 'Percent', '#e57373',
@@ -1540,7 +1634,7 @@ class MacroDialog(QDialog):
             ordered.append((title, tab))
             self._widgets.append(tab)
 
-        # 7. BBB corporate yield vs 10Y Treasury benchmark.
+        # 8. BBB corporate yield vs 10Y Treasury benchmark.
         self._credit_tab = CreditSpreadTab(self)
         ordered.append(('BBB Yield vs 10Y Treasury', self._credit_tab))
 
@@ -1559,7 +1653,7 @@ class MacroDialog(QDialog):
             ordered.append((title, tab))
             self._widgets.append(tab)
 
-        # 8. ISM Manufacturing PMI — нет бесплатного машинного источника: FRED
+        # 9. ISM Manufacturing PMI — нет бесплатного машинного источника: FRED
         # убрал ISM в 2016, зеркало DBnomics не обновляется с 08.2025, сайт ISM
         # закрыт (403). Данные выгружаются через ассистента (кнопка «Промт») и
         # подгружаются из CSV кнопкой «Load».
@@ -1579,7 +1673,7 @@ class MacroDialog(QDialog):
         self._widgets.append(ism_m)
         ordered.append(('ISM Manufacturing PMI', ism_m))
 
-        # 9. ISM Services PMI — тот же ручной импорт (см. комментарий выше).
+        # 10. ISM Services PMI — тот же ручной импорт (см. комментарий выше).
         ism_s = _IndicatorTab(
             _ISM_SERVICES_ID, 'ISM Services PMI', 'Index (PMI)', '#a5d6a7',
             'Индекс деловой активности в сфере услуг США; '
@@ -1598,7 +1692,7 @@ class MacroDialog(QDialog):
         self._widgets.append(ism_s)
         ordered.append(('ISM Services PMI', ism_s))
 
-        # 10. NFIB composite of leading survey components. FRED не публикует
+        # 11. NFIB composite of leading survey components. FRED не публикует
         # NFIB, поэтому данные тянутся с официального API NFIB SBET (см.
         # nfib.fetch_components) с кэшем по TTL, как остальные FRED-серии.
         # Композит z-скорит 6 опережающих компонентов и сжимает tanh в
@@ -1618,7 +1712,7 @@ class MacroDialog(QDialog):
         self._widgets.append(nfib_tab)
         ordered.append(('NFIB Composite (leading)', nfib_tab))
 
-        # 11. Buffett indicator.
+        # 12. Buffett indicator.
         buffett = _IndicatorTab(
             _BUFFETT_ID, 'Buffett indicator', 'Percent', '#ffab91',
             'Соотношение капитализации американского рынка к ВВП', self)
@@ -1628,6 +1722,10 @@ class MacroDialog(QDialog):
         ordered.append(('Buffett Indicator', buffett))
         self._widgets.append(buffett)
         self._buffett_tab = buffett
+
+        # 13. FOMC statement feed (a list, not a chart).
+        self._fomc_tab = FomcTab(self)
+        ordered.append(('FOMC Statement', self._fomc_tab))
 
         for title, tab in ordered:
             self.tabs.addTab(tab, title)
@@ -1655,6 +1753,9 @@ class MacroDialog(QDialog):
     def _on_row_loaded(self, series_id, dates, values, note):
         if series_id in (_LATE_GDPI, _LATE_CC):
             self._late_data[series_id] = (dates, values)
+            return
+        if series_id == 'FOMC':
+            self._fomc_tab.set_statements(load_fomc_statements())
             return
         if series_id == 'NTFS':
             self._yield_tab.set_ntfs(dates, values)
@@ -1687,9 +1788,32 @@ class MacroDialog(QDialog):
                 tab.set_data(dates, values, note)
                 if series_id == _BUFFETT_ID:
                     self._update_buffett_hint(values)
+                if series_id == _NETLIQ_ID:
+                    self._update_netliq_hint(values)
                 if series_id in _MANUAL_IDS and values:
                     tab.set_hint('', '')
                 return
+
+    def _update_netliq_hint(self, values):
+        """Per-tab status hint for the Net Liquidity tab (level + 90d change)."""
+        if not values:
+            return
+        v = values[-1]
+        if v != v:  # NaN
+            return
+        dates = self._netliq_tab._dates
+        mo = _at_days_ago(dates, values, _MOMENTUM_DAYS) if dates else None
+        d = (v - mo) if mo is not None and mo == mo else None
+        if d is not None and d <= -150.0:
+            self._netliq_tab.set_hint(
+                'Чистая ликвидность {:.0f} млрд $, за квартал −{:.0f} млрд $ — '
+                'резервы сжимаются.'.format(v, -d), '#ef5350')
+        elif d is not None and d >= 150.0:
+            self._netliq_tab.set_hint(
+                'Чистая ликвидность {:.0f} млрд $, за квартал +{:.0f} млрд $ — '
+                'резервы наполняются.'.format(v, d), '#81c784')
+        else:
+            self._netliq_tab.set_hint('Чистая ликвидность: {:.0f} млрд $.'.format(v))
 
     def _update_buffett_hint(self, values):
         latest = values[-1] if values else None
@@ -1759,6 +1883,8 @@ class MacroDialog(QDialog):
             advice = self._yield_tab.curve_comparison_message()
         elif widget is self._realrate_tab:
             advice = self._realrate_tab.real_rate_advice()
+        elif widget is self._netliq_tab:
+            advice = self._netliq_tab.netliq_advice()
         elif widget is self._gdp_tab:
             g = self._late_data.get(_LATE_GDPI)
             c = self._late_data.get(_LATE_CC)
@@ -1773,6 +1899,10 @@ class MacroDialog(QDialog):
             advice = widget.nfib_advice()
         elif widget is self._sentiment_tab:
             advice = widget.sentiment_advice()
+        elif widget is self._fomc_tab:
+            if unread_count():
+                advice = ('Есть непрочитанные заявления ФРС (FOMC). '
+                          'Нажмите на строку, чтобы прочитать.')
         self._show_goat(advice)
 
     def closeEvent(self, event):
@@ -1787,6 +1917,7 @@ class MacroDialog(QDialog):
         self.reloadButton.setEnabled(False)
         self._late_data = {}
         loaders = {_BUFFETT_ID: _load_buffett,
+                   _NETLIQ_ID: _load_netliq,
                    _ISM_ID: _load_ism,
                    _ISM_SERVICES_ID: _load_ism,
                    _NFIB_ID: _load_nfib}
@@ -1799,6 +1930,7 @@ class MacroDialog(QDialog):
         items.append(('MLRCI_MARKS', _load_mlrci_marks))
         items.append(('SP500', _fred))
         items.append(('NTFS', _load_ntfs))
+        items.append(('FOMC', _load_fomc))
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
         self._loader = _ChartLoaderThread(items, self)

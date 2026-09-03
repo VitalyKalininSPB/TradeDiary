@@ -184,7 +184,7 @@ class _MacroRefreshThread(QtCore.QThread):
     All data fetching happens here (background), so the main window never blocks
     on network or FRED cache refresh. Emits the fresh values back to the UI.
     """
-    finished_ok = QtCore.Signal(int, str, str, bool)  # score, note, regime, late_cycle
+    finished_ok = QtCore.Signal(int, str, str, bool, int)  # score, note, regime, late_cycle, fomc_new
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -209,7 +209,14 @@ class _MacroRefreshThread(QtCore.QThread):
             late_cycle = late_cycle_signal()[0]
         except Exception:  # noqa: BLE001
             late_cycle = False
-        self.finished_ok.emit(score, note, regime, late_cycle)
+        fomc_new = 0
+        try:
+            from fomc import refresh_fomc_if_stale, unread_count
+            refresh_fomc_if_stale()
+            fomc_new = unread_count()
+        except Exception:  # noqa: BLE001
+            fomc_new = 0
+        self.finished_ok.emit(score, note, regime, late_cycle, fomc_new)
 
 
 class TradeDiary(QtWidgets.QMainWindow):
@@ -235,6 +242,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
         self.balanceEdit.editingFinished.connect(self.balanceEdited)
         self.recalcBalance()
+        self._fomc_new = 0
         self.setupMacro()
         self.setupCorrelation()
         self.quantitiveAssessmentButton.clicked.connect(self.quantitiveAssessmentClicked)
@@ -503,11 +511,13 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._macroThread.finished_ok.connect(self._onMacroRefreshed)
         self._macroThread.start()
 
-    def _onMacroRefreshed(self, value, note, regime, late_cycle):
+    def _onMacroRefreshed(self, value, note, regime, late_cycle, fomc_new):
         """Apply background-computed values (runs on the UI thread)."""
         self._late_cycle = late_cycle
+        self._fomc_new = fomc_new
         self._applyMacro(value, note)
         self._applyRegimeIcon(regime)
+        self._show_advice_goat()
 
     def _applyMacro(self, value, note):
         self.macroProgressBar.setValue(value)
@@ -719,10 +729,16 @@ class TradeDiary(QtWidgets.QMainWindow):
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
-        if not getattr(self, '_late_cycle', False):
+        advice = None
+        if getattr(self, '_fomc_new', 0):
+            advice = ('Глава ФРС сделал заявление: есть непрочитанные заявления '
+                      'FOMC. Откройте «Макро» → вкладка FOMC Statement, чтобы '
+                      'прочитать.')
+        elif getattr(self, '_late_cycle', False):
+            advice = self._LATE_CYCLE_GOAT_TEXT
+        if not advice:
             return
-        self._goat = GoatAssistant('', self, advice=self._LATE_CYCLE_GOAT_TEXT,
-                                   auto_hide_ms=5000)
+        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=5000)
         self._goat.show()
 
     def deleteClicked(self, row):
