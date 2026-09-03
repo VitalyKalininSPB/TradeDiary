@@ -39,10 +39,24 @@ def _conn():
 def _insert_event(kind, key, message):
     conn = _conn()
     try:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO quant_events (kind, observed_at, key, message) "
             "VALUES (?,?,?,?)",
             (kind, datetime.datetime.now().isoformat(), key, message))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def delete_events(ids):
+    """Удалить события (используется симуляцией — не оставлять следов)."""
+    if not ids:
+        return
+    conn = _conn()
+    try:
+        conn.executemany("DELETE FROM quant_events WHERE id=?",
+                         [(i,) for i in ids])
         conn.commit()
     finally:
         conn.close()
@@ -71,9 +85,9 @@ def record_sector_signal_change(prev_sectors, new_sectors):
             msg = '{}: сигнал изменился: {} → {}'.format(
                 s.get('sector', slug),
                 _action_label(old_action), _action_label(new_action))
-            _insert_event('sector_signal', slug, msg)
-            events.append({'kind': 'sector_signal', 'key': slug,
-                           'message': msg,
+            event_id = _insert_event('sector_signal', slug, msg)
+            events.append({'id': event_id, 'kind': 'sector_signal',
+                           'key': slug, 'message': msg,
                            'observed_at': datetime.datetime.now().isoformat()})
     return events
 
@@ -111,12 +125,13 @@ def check_company_scores(companies):
                 delta = score - prev
                 msg = '{}: company score {:.2f} → {:.2f} ({:+.2f})'.format(
                     ticker, prev, score, delta)
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO quant_events (kind, observed_at, key, message) "
                     "VALUES (?,?,?,?)",
                     ('company_score', now, ticker, msg))
-                events.append({'kind': 'company_score', 'key': ticker,
-                               'message': msg, 'observed_at': now})
+                events.append({'id': cur.lastrowid, 'kind': 'company_score',
+                               'key': ticker, 'message': msg,
+                               'observed_at': now})
             conn.execute(
                 "INSERT OR REPLACE INTO company_score_baseline "
                 "(ticker, sector, score, observed_at) VALUES (?,?,?,?)",
@@ -135,6 +150,31 @@ def _load_baseline():
     finally:
         conn.close()
     return {t: s for t, s in rows}
+
+
+def baseline_snapshot():
+    """Снимок таблицы baseline: [(ticker, sector, score, observed_at)]."""
+    conn = _conn()
+    try:
+        return conn.execute(
+            "SELECT ticker, sector, score, observed_at "
+            "FROM company_score_baseline").fetchall()
+    finally:
+        conn.close()
+
+
+def restore_baseline(rows):
+    """Восстановить baseline из снимка (используется симуляцией)."""
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM company_score_baseline")
+        conn.executemany(
+            "INSERT INTO company_score_baseline "
+            "(ticker, sector, score, observed_at) VALUES (?,?,?,?)",
+            rows)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ------------------------------------------------------------------- query

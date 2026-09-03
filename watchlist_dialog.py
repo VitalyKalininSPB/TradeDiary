@@ -304,9 +304,9 @@ class WatchlistDialog(QtWidgets.QDialog):
         self._test_timer.start(15000)
 
     def _simulate_sector(self):
-        """Симуляция смены секторного сигнала через реальный детект."""
+        """Симуляция смены секторного сигнала (одноразово, без следов)."""
         from sector_quant import load_result
-        from quant_alerts import record_sector_signal_change, mark_all_seen
+        from quant_alerts import record_sector_signal_change, delete_events
         payload = load_result()
         sectors = (payload or {}).get('sectors') or []
         if not sectors:
@@ -324,26 +324,31 @@ class WatchlistDialog(QtWidgets.QDialog):
         prev[0]['status'] = dict(st)
         prev[0]['status']['action_id'] = flip.get(st.get('action_id'), 'watchlist')
         events = record_sector_signal_change(prev, sectors)
-        mark_all_seen()
+        if events:
+            delete_events([e['id'] for e in events])
         self._show_goat(
             'Симуляция смены секторного сигнала:\n'
             + (events[0]['message'] if events else 'изменений нет'))
 
     def _simulate_company(self):
-        """Симуляция движения company score (порог 0.10) через реальный детект."""
+        """Симуляция движения company score (одноразово, без следов)."""
         from company_data import sector_companies_cached
-        from quant_alerts import check_company_scores, mark_all_seen
+        from quant_alerts import (check_company_scores, delete_events,
+                                  baseline_snapshot, restore_baseline)
         comps = sector_companies_cached('Technology')
         if not comps:
             self._show_goat('Нет данных компаний.')
             return
-        check_company_scores(comps)  # инициализация baseline текущими значениями
+        snap = baseline_snapshot()
+        check_company_scores(comps)  # baseline текущими значениями
         import copy
         c = dict(copy.deepcopy(comps[0]))
         c['netMarginPct'] = (c.get('netMarginPct') or 10.0) + 25.0
         c['return1yPct'] = (c.get('return1yPct') or 0.0) + 60.0
         events = check_company_scores([c] + comps[1:])
-        mark_all_seen()
+        restore_baseline(snap)
+        if events:
+            delete_events([e['id'] for e in events])
         self._show_goat(
             'Симуляция изменения company score:\n'
             + (events[0]['message'] if events else 'изменений нет'))

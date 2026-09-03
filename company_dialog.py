@@ -119,24 +119,34 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             events = check_company_scores(inputs)
         except Exception as e:  # noqa: BLE001
             print('Company alerts: {}'.format(e))
+        scored = [r for r in rows if r['company_score'] is not None]
+        unscored = [r for r in rows if r['company_score'] is None]
+        long_rows = sorted(
+            [r for r in scored
+             if r['label'] in (company_quant.LABEL_RESEARCH_PRIORITY,
+                               company_quant.LABEL_WATCHLIST)],
+            key=lambda r: r['company_score'], reverse=True)
+        short_rows = sorted(
+            [r for r in scored
+             if r['label'] == company_quant.LABEL_LOW_PRIORITY],
+            key=lambda r: r['company_score'])
+        for i, r in enumerate(long_rows, start=1):
+            r['_long_rank'] = i
+        for i, r in enumerate(short_rows, start=1):
+            r['_short_rank'] = i
         note = ''
         if events:
             note = ' · {} компаний изменили score'.format(len(events))
+        if unscored:
+            note += ' · {} без данных'.format(len(unscored))
         self.infoLabel.setText(
-            'Сектор {} · компаний: {} · Long = сильные, Short = слабые '
-            '(тот же Company Score, разная сортировка){}'.format(
-                self._sector, len(rows), note))
+            'Сектор {} · Long {} · Short {} · Long = сильные, Short = худшие{}'.format(
+                self._sector, len(long_rows), len(short_rows), note))
         if events:
             self._show_goat(
                 'Компании изменили score:\n' + '\n'.join(
                     e['message'] for e in events[:4]))
-        scored = [r for r in rows if r['company_score'] is not None]
-        unscored = [r for r in rows if r['company_score'] is None]
-        short = sorted(scored, key=lambda r: r['company_score'])
-        for i, r in enumerate(short, start=1):
-            r['_short_rank'] = i
-        short_rows = short + unscored
-        self._fill(self.longTable, rows, 'rank')
+        self._fill(self.longTable, long_rows, '_long_rank')
         self._fill(self.shortTable, short_rows, '_short_rank')
 
     def _fill(self, table, rows, rank_key):
