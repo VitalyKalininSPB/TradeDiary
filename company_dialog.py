@@ -26,8 +26,8 @@ _LABEL_SHORT_RU = {
 }
 
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
-            'Rel Momentum 1M', 'Rel Momentum 1Y', 'Company Score',
-            'Research status']
+            'Forward P/E', 'EPS growth %', 'Rel Momentum 1M', 'Rel Momentum 1Y',
+            'Company Score', 'Research status']
 
 
 class _CompanyDataThread(QtCore.QThread):
@@ -224,6 +224,18 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         r1y = s.get('rel_momentum_1y')
         lines.append('• Relative Momentum 1Y: {:+.1f} п.п.'.format(r1y)
                      if r1y is not None else '• Relative Momentum 1Y: -')
+        pe = s.get('forward_pe')
+        median_pe = s.get('sector_median_pe')
+        if pe is not None and median_pe:
+            lines.append('• Forward P/E: {:.1f}×, {} медианы {}'.format(
+                pe, 'ниже' if pe <= median_pe else 'выше', self._sector))
+        elif pe is not None:
+            lines.append('• Forward P/E: {:.1f}×'.format(pe))
+        else:
+            lines.append('• Forward P/E: -')
+        eg = s.get('eps_growth')
+        lines.append('• EPS growth (YoY): {:+.1f}%'.format(eg)
+                     if eg is not None else '• EPS growth (YoY): -')
         score = s.get('score_rounded')
         lines.append('• Company Score: {:+.2f}'.format(score)
                      if score is not None else '• Company Score: -')
@@ -268,6 +280,8 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 s.get('company') or '-',
                 self._fmt(s.get('net_margin'), '%'),
                 self._fmt(s.get('net_margin_yoy'), 'pp'),
+                self._pe(s.get('forward_pe')),
+                self._fmt(s.get('eps_growth'), '%'),
                 self._fmt(s.get('rel_momentum_1m'), '%'),
                 self._fmt(s.get('rel_momentum_1y'), '%'),
                 self._fmt(s.get('score_rounded')),
@@ -275,7 +289,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))
-                if c == 8:
+                if c == 10:
                     color = _LABEL_COLORS.get(label, _LABEL_COLORS[
                         company_quant.LABEL_INSUFFICIENT])
                     item.setBackground(QtGui.QColor(color))
@@ -285,7 +299,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                     if warnings:
                         tip += '\n' + '\n'.join(warnings)
                     item.setToolTip(tip)
-                elif c in (4, 5, 6, 7):
+                elif c in (4, 5, 6, 7, 8, 9):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
@@ -335,6 +349,12 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         if suffix:
             return '{:+.1f}{}'.format(value, suffix)
         return '{:.2f}'.format(value)
+
+    @staticmethod
+    def _pe(value):
+        if value is None:
+            return '-'
+        return '{:.1f}×'.format(value)
 
     def _show_goat(self, advice):
         from qualitative_dialog import GoatAssistant
