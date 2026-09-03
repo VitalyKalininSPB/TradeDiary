@@ -61,20 +61,36 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         self.shortTable = self._make_table()
         self.tabs.addTab(self.longTable, 'Long candidates')
         self.tabs.addTab(self.shortTable, 'Short candidates')
-        root.addWidget(self.tabs, 1)
+        self.longTable.itemClicked.connect(
+            lambda item: self._on_company_clicked(self.longTable, item))
+        self.shortTable.itemClicked.connect(
+            lambda item: self._on_company_clicked(self.shortTable, item))
+        root.addWidget(self.tabs, 3)
+
+        self.detail = QtWidgets.QTextBrowser()
+        self.detail.setStyleSheet(
+            'background: #1e1f24; color: {}; border: 1px solid #43464f;'
+            .format(_TXT))
+        root.addWidget(self.detail, 2)
 
         row = QtWidgets.QHBoxLayout()
         self.watchButton = QtWidgets.QPushButton('Add to watchlist')
+        self.qualButton = QtWidgets.QPushButton('Qualitative Assessment')
+        self.qualButton.setEnabled(False)
         closeButton = QtWidgets.QPushButton('Close')
         row.addWidget(self.watchButton)
+        row.addWidget(self.qualButton)
         row.addStretch(1)
         row.addWidget(closeButton)
         root.addLayout(row)
         self.watchButton.clicked.connect(self._add_to_watchlist)
+        self.qualButton.clicked.connect(self._open_qualitative)
         closeButton.clicked.connect(self.close)
 
         self._sector = sector
         self._thread = None
+        self._long_rows = []
+        self._short_rows = []
         self._load()
 
     def _make_table(self):
@@ -94,7 +110,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             self.longTable.setRowCount(0)
             self.shortTable.setRowCount(0)
         else:
-            self._render(inputs)
+            self._render(inputs, detect=False)
         self._start_refresh()
 
     def _start_refresh(self):
@@ -106,19 +122,20 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         self._thread.start()
 
     def _on_loaded(self, inputs):
-        self._render(inputs)
+        self._render(inputs, detect=True)
 
     def _on_failed(self, error):
         self.infoLabel.setText(self.infoLabel.text() + ' · ошибка метрик: ' + error)
 
-    def _render(self, inputs):
+    def _render(self, inputs, detect=False):
         rows = company_quant.rank_companies(inputs)
         events = []
-        from quant_alerts import check_company_scores
-        try:
-            events = check_company_scores(inputs)
-        except Exception as e:  # noqa: BLE001
-            print('Company alerts: {}'.format(e))
+        if detect:
+            from quant_alerts import check_company_scores
+            try:
+                events = check_company_scores(inputs)
+            except Exception as e:  # noqa: BLE001
+                print('Company alerts: {}'.format(e))
         scored = [r for r in rows if r['company_score'] is not None]
         unscored = [r for r in rows if r['company_score'] is None]
         long_rows = sorted(
@@ -148,11 +165,95 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                     e['message'] for e in events[:4]))
         self._fill(self.longTable, long_rows, '_long_rank')
         self._fill(self.shortTable, short_rows, '_short_rank')
+        self._long_rows = long_rows
+        self._short_rows = short_rows
+        self._show_company_detail(long_rows[0] if long_rows else None)
+
+    def _on_company_clicked(self, table, item):
+        rows = self._long_rows if table is self.longTable else self._short_rows
+        row = item.row()
+        if 0 <= row < len(rows):
+            self._show_company_detail(rows[row])
+
+    def _sector_context(self):
+        try:
+            from sector_quant import load_result
+            payload = load_result()
+        except Exception:  # noqa: BLE001
+            return None
+        for s in (payload or {}).get('sectors', []):
+            if s.get('sector') == self._sector:
+                return s
+        return None
+
+    def _show_company_detail(self, s):
+        if s is None:
+            self.detail.setPlainText('')
+            self.qualButton.setEnabled(False)
+            return
+        label = s.get('label', company_quant.LABEL_INSUFFICIENT)
+        title = _LABEL_RU.get(label, label)
+        company = s.get('company') or s.get('ticker') or ''
+        sr = self._sector_context()
+        lines = ['{} — {}'.format(company, title), '']
+
+        lines.append('Почему попала в shortlist:')
+        margin = s.get('net_margin')
+        median = s.get('sector_median_margin')
+        if margin is not None and median is not None:
+            lines.append('• Net Margin: {:.1f}%, {} медианы {}'.format(
+                margin, 'выше' if margin >= median else 'ниже', self._sector))
+        elif margin is not None:
+            lines.append('• Net Margin: {:.1f}%'.format(margin))
+        else:
+            lines.append('• Net Margin: -')
+        rp = s.get('relative_profitability')
+        lines.append('• Relative Profitability: {:+.2f}'.format(rp)
+                     if rp is not None else '• Relative Profitability: -')
+        r1m = s.get('rel_momentum_1m')
+        lines.append('• Relative Momentum 1M: {:+.1f} п.п.'.format(r1m)
+                     if r1m is not None else '• Relative Momentum 1M: -')
+        r1y = s.get('rel_momentum_1y')
+        lines.append('• Relative Momentum 1Y: {:+.1f} п.п.'.format(r1y)
+                     if r1y is not None else '• Relative Momentum 1Y: -')
+        score = s.get('score_rounded')
+        lines.append('• Company Score: {:+.2f}'.format(score)
+                     if score is not None else '• Company Score: -')
+
+        lines.append('')
+        lines.append('Контекст:')
+        lines.append('• Sector: {}'.format(self._sector))
+        st = (sr or {}).get('status') or {}
+        lines.append('• Sector Signal: {}'.format(st.get('status', '-')))
+        ss = (sr or {}).get('score')
+        lines.append('• Sector Score: {:+.2f}'.format(ss)
+                     if ss is not None else '• Sector Score: -')
+
+        lines.append('')
+        lines.append('Следующий шаг:')
+        lines.append('Запустить Qualitative Assessment.')
+        self.detail.setPlainText('\n'.join(lines))
+        self.qualButton.setEnabled(True)
+
+    def _open_qualitative(self):
+        table = self.tabs.currentWidget()
+        rows = self._long_rows if table is self.longTable else self._short_rows
+        row = table.currentRow()
+        if not (0 <= row < len(rows)):
+            return
+        ticker = rows[row].get('ticker')
+        if not ticker:
+            return
+        from qualitative_dialog import QualitativeAssessmentDialog
+        dlg = QualitativeAssessmentDialog(self.window())
+        dlg.tickerEdit.setText(ticker)
+        dlg.show()
 
     def _fill(self, table, rows, rank_key):
         table.setRowCount(len(rows))
         for r, s in enumerate(rows):
             label = s.get('label', company_quant.LABEL_INSUFFICIENT)
+            label_ru = _LABEL_RU.get(label, label)
             vals = [
                 s.get(rank_key) if s.get(rank_key) is not None else '-',
                 s.get('ticker') or '-',
@@ -162,7 +263,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 self._fmt(s.get('rel_momentum_1m'), '%'),
                 self._fmt(s.get('rel_momentum_1y'), '%'),
                 self._fmt(s.get('score_rounded')),
-                label,
+                label_ru,
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))

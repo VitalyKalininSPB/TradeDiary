@@ -111,7 +111,9 @@ def _rank_sector(sector, companies):
     rankable = [e for e in entries if e.get('_rankable')]
     margins = [e['net_margin'] for e in rankable]
     avg = sum(margins) / len(margins) if margins else 0.0
+    median = sorted(margins)[len(margins) // 2] if margins else None
     for e in rankable:
+        e['sector_median_margin'] = median
         rp = math.tanh((e['net_margin'] - avg) / 10.0)
         rel1m = e['return_1m'] - e['benchmark_1m']
         rel1y = e['return_1y'] - e['benchmark_1y']
