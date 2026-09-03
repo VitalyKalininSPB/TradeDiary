@@ -128,52 +128,12 @@ def _build_ism_prompt(name, context, period='2000-01-01'):
 _ISM_PROMPT = _build_ism_prompt(_ISM_NAME, 'в обрабатывающей промышленности США')
 _ISM_SERVICES_PROMPT = _build_ism_prompt(_ISM_SERVICES_NAME, 'в сфере услуг США')
 
-
-def _build_nfib_prompt(period='2000-01-01'):
-    """Prompt to dump the NFIB leading components as a multi-column CSV.
-
-    NFIB (Small Business Economic Trends) has no free machine source, so the
-    assistant emits date + 6 forward-looking component columns; the user saves
-    the block and imports it through the tab's Load button.
-    """
-    return (
-        'Ты — эксперт по опросу малого бизнеса NFIB (Small Business Economic '
-        'Trends, США).\n\n'
-        'Задача: выгрузить ПОЛНЫЙ исторический ряд 6 ОПЕРЕЖАЮЩИХ компонентов '
-        'индекса оптимизма NFIB одним CSV-блоком. Никаких пояснений, '
-        'вступлений или «...».\n\n'
-        'Формат — одна строка на месяц, разделитель запятая, первая строка — '
-        'заголовок:\n'
-        'date,exp_sales,exp_cond,job_plans,capex,inv_plans,expand\n'
-        '{period},26,38,19,28,2,22\n\n'
-        'Колонки (диффузионные индексы, net %, выше = оптимизм):\n'
-        '1. exp_sales — % ожидающих роста продаж (следующие 3 мес)\n'
-        '2. exp_cond — % ожидающих улучшения деловых условий (следующие 6 мес)\n'
-        '3. job_plans — % планирующих нанимать (следующие 3 мес)\n'
-        '4. capex — % планирующих капзатраты (следующие 3–6 мес)\n'
-        '5. inv_plans — % планирующих рост запасов (следующие 3–6 мес)\n'
-        '6. expand — % считающих, что сейчас хорошее время расширяться\n\n'
-        'Требования:\n'
-        '1. date — ISO YYYY-MM-DD, первый день месяца.\n'
-        '2. Значения — одно десятичное через точку (или NA, если не '
-        'подтверждено); все 6 колонок обязательны.\n'
-        '3. Период: с {period} по последний опубликованный месяц; без пропусков.\n'
-        '4. Источник — официальные сезонно скорректированные данные NFIB; сверь '
-        'по нескольким источникам.\n'
-        '5. Если ответ не помещается целиком — продолжай в следующем сообщении '
-        'с точного места обрыва, не повторяя уже выданные строки.\n'
-        '6. Не выдумывай значения: неподтверждённое → NA (строку с датой всё '
-        'равно оставь).\n\n'
-        'Верни ТОЛЬКО CSV-блок.'
-    ).format(period=period)
-
-
 _NFIB_ID = 'NFIB_COMPOSITE'
 _NFIB_NAME = 'NFIB Composite (leading indicators)'
-_NFIB_PROMPT = _build_nfib_prompt()
+_NFIB_START_YEAR = 1986  # NFIB SBET data available from 1986 on the API
 
 # Series that have no machine source and are imported manually (Load button).
-_MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID, _NFIB_ID)
+_MANUAL_IDS = (_ISM_ID, _ISM_SERVICES_ID)
 
 # Cleveland Fed ex-ante (expected) real interest rate, 10-year horizon. A
 # model-based real rate (nominal yields minus model-implied expected inflation,
@@ -223,6 +183,26 @@ def _load_cached(series_id):
         return None
     try:
         data = json.loads(data_json)
+        dates = [datetime.date.fromisoformat(d) for d in data['dates']]
+        values = data['values']
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return dates, values
+
+
+def _load_any_cached(series_id):
+    """Return (dates, values) from the cache regardless of freshness, else None."""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT data FROM macro_series WHERE series_id=?",
+            (series_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        data = json.loads(row[0])
         dates = [datetime.date.fromisoformat(d) for d in data['dates']]
         values = data['values']
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -287,6 +267,34 @@ def _load_ism(series_id):
     return dates, values
 
 
+def _load_nfib(series_id):
+    """Load the NFIB leading composite as (dates, values), cached with TTL.
+
+    Fresh cache is returned instantly; stale-or-missing data is re-fetched from
+    the official NFIB SBET API (see nfib.fetch_components), composited and
+    cached. On network failure a stale cache entry is served as a fallback so
+    the tab keeps the last good data.
+    """
+    cached = _load_cached(series_id)
+    if cached is not None:
+        return cached
+    today = datetime.date.today()
+    start = datetime.date(_NFIB_START_YEAR, 1, 1)
+    try:
+        dates, cols = nfib.fetch_components(
+            start.year, start.month, today.year, today.month)
+        values = nfib.compute_composite(cols)
+        if dates and values:
+            _save_cached(series_id, dates, values)
+            return dates, values
+    except Exception as e:  # noqa: BLE001 - network failure fallback
+        print('Failed to fetch NFIB composite: {}'.format(e))
+    stale = _load_any_cached(series_id)
+    if stale is not None:
+        return stale
+    return [], []
+
+
 def _parse_ism_csv(path):
     """Parse a `date,value` CSV (as exported by the ISM prompt) into a series.
 
@@ -315,44 +323,6 @@ def _parse_ism_csv(path):
         dates = [dates[i] for i in order]
         values = [values[i] for i in order]
     return dates, values
-
-
-def _parse_nfib_csv(path):
-    """Parse a multi-column `date,comp1..comp6` CSV into (dates, cols dict).
-
-    The first row may be a header; value columns follow nfib.COMPONENTS order.
-    Missing/non-numeric values (NA, nan) become NaN so the composite chart
-    shows a gap instead of a bogus point.
-    """
-    col_names = [name for _label, name in nfib.COMPONENTS]
-    dates = []
-    cols = {name: [] for name in col_names}
-    with open(path, newline='', encoding='utf-8-sig') as f:
-        for raw in csv.reader(f):
-            if not raw or len(raw) < 2:
-                continue
-            d_raw = raw[0].strip()
-            try:
-                d = datetime.date.fromisoformat(d_raw)
-            except ValueError:
-                continue  # header row or unparseable date
-            row = []
-            for c in raw[1:len(col_names) + 1]:
-                v_raw = c.strip().replace(',', '').replace('%', '')
-                try:
-                    row.append(float(v_raw))
-                except ValueError:
-                    row.append(float('nan'))
-            while len(row) < len(col_names):
-                row.append(float('nan'))
-            dates.append(d)
-            for name, v in zip(col_names, row):
-                cols[name].append(v)
-    if dates:
-        order = sorted(range(len(dates)), key=lambda i: dates[i])
-        dates = [dates[i] for i in order]
-        cols = {name: [v[i] for i in order] for name, v in cols.items()}
-    return dates, cols
 
 
 def _load_ntfs(series_id):
@@ -1576,9 +1546,11 @@ class MacroDialog(QDialog):
         self._widgets.append(ism_s)
         ordered.append(('ISM Services PMI', ism_s))
 
-        # 10. NFIB composite of leading survey components — тоже ручной импорт
-        # (FRED не публикует NFIB). Композит z-скорит 6 опережающих компонентов
-        # и сжимает tanh в [-100;+100].
+        # 10. NFIB composite of leading survey components. FRED не публикует
+        # NFIB, поэтому данные тянутся с официального API NFIB SBET (см.
+        # nfib.fetch_components) с кэшем по TTL, как остальные FRED-серии.
+        # Композит z-скорит 6 опережающих компонентов и сжимает tanh в
+        # [-100;+100].
         nfib_tab = _IndicatorTab(
             _NFIB_ID, 'NFIB Composite (leading)', 'Composite [-100..+100]',
             '#4dd0e1',
@@ -1587,16 +1559,9 @@ class MacroDialog(QDialog):
             'запасов, «хорошее время расширяться». Каждый нормирован в '
             'Z-оценку, среднее сжато tanh в [-100;+100]. Выше +50 — малый '
             'бизнес смотрит вперёд оптимистично; ниже −50 — сворачивает '
-            'активность.', self,
-            show_load_button=True)
+            'активность.', self)
         nfib_tab._hlines = [-80, 0, 80]
         nfib_tab._zones = [(80, 100, '#81c784'), (-100, -80, '#ef5350')]
-        nfib_tab.set_manual_loader(
-            lambda: self._load_nfib_csv(_NFIB_ID, nfib_tab, _NFIB_NAME))
-        nfib_tab.set_show_prompt(
-            lambda: self._show_manual_prompt(_NFIB_NAME, _NFIB_PROMPT))
-        nfib_tab.set_hint('Нажмите «Промт» (скопировать запрос в буфер обмена), '
-                          'затем «Load» и выберите выгруженный CSV.', '#ef9a9a')
         self._nfib_tab = nfib_tab
         self._widgets.append(nfib_tab)
         ordered.append(('NFIB Composite (leading)', nfib_tab))
@@ -1716,39 +1681,6 @@ class MacroDialog(QDialog):
         tab.set_data(dates, values, note)
         tab.set_hint('', '')
 
-    def _load_nfib_csv(self, series_id, tab, name):
-        """Pick an NFIB CSV (date + 6 component columns) and cache the composite."""
-        if tab is None:
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Загрузить {} (CSV)'.format(name), '',
-            'CSV (*.csv);;All files (*)')
-        if not path:
-            return
-        try:
-            dates, cols = _parse_nfib_csv(path)
-        except Exception as e:  # noqa: BLE001 - file read failure
-            QMessageBox.warning(self, name,
-                                'Не удалось прочитать файл:\n{}'.format(e))
-            return
-        if not dates:
-            QMessageBox.warning(
-                self, name,
-                'Не найдено строк в формате date + 6 колонок компонентов '
-                '(дата YYYY-MM-DD).')
-            return
-        values = nfib.compute_composite(cols)
-        if not values or all(v != v for v in values):
-            QMessageBox.warning(
-                self, name,
-                'Не удалось вычислить композит — нет данных по компонентам.')
-            return
-        _save_cached(series_id, dates, values)
-        note = '{:,} points, {}..{}'.format(
-            len(values), dates[0].isoformat(), dates[-1].isoformat())
-        tab.set_data(dates, values, note)
-        tab.set_hint('', '')
-
     def _show_goat(self, advice):
         """Show the goat with `advice` (long enough to read), or hide it."""
         from qualitative_dialog import GoatAssistant
@@ -1803,7 +1735,7 @@ class MacroDialog(QDialog):
         loaders = {_BUFFETT_ID: _load_buffett,
                    _ISM_ID: _load_ism,
                    _ISM_SERVICES_ID: _load_ism,
-                   _NFIB_ID: _load_ism}
+                   _NFIB_ID: _load_nfib}
         items = [(t.series_id, loaders.get(t.series_id, _fred))
                  for t in self._widgets]
         items.extend((sid, _fred) for sid, _lbl, _years in YIELD_CURVE_SERIES)
