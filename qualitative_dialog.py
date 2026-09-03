@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import html
 import os
 
 from urllib.parse import quote_plus
@@ -26,7 +27,143 @@ try:
 except Exception:  # pragma: no cover - fallback
     QWebEngineView = None
 
-STAGES = ['Management Operation Plan (MOP)', 'KPI', 'Board of directors']
+STAGES = ['Management Operation Plan (MOP)', 'KPI',
+          'Management Track Record', 'Board of directors',
+          'Insider Stock & Option Ownership',
+          'Research Analyst Estimates, Range and Ratings']
+
+# Промт этапа MOP. Показываем как копируемый текст в webview (в URL Google
+# поиска длинный русский текст не помещается — кириллица кодируется в 4–6 раз
+# длиннее, лимит ~2048 символов).
+MOP_PROMPT = """Проведи краткий MOP-анализ компании [ТИКЕР] для горизонта 20–60 торговых дней.
+
+Под MOP понимай публичный Management & Operations Plan: текущие стратегические и операционные приоритеты, распределение ресурсов, guidance, сроки и ключевые инициативы. Не ищи обязательно документ с названием MOP; восстанови план из последних earnings release/call, 10-Q/10-K, investor presentation и официальных заявлений.
+
+Ответь по-русски:
+1) 3–5 главных приоритетов компании;
+2) конкретные цели, сроки и guidance;
+3) что изменилось с прошлого квартала;
+4) насколько план реалистичен: Strong/Adequate/Weak;
+5) главный фактор, способный повлиять на акцию в ближайшие 20–60 дней.
+
+Отделяй факты от выводов. Для каждого важного факта дай ссылку и дату источника."""
+
+KPI_PROMPT = """Определи ключевые KPI компании [ТИКЕР], которые рынок будет оценивать в следующие 20–60 торговых дней.
+
+Используй последние earnings release/call, filings и investor presentation. Не подменяй KPI общими финансовыми показателями: выбери именно метрики, по которым можно проверить исполнение текущего MOP.
+
+Дай таблицу:
+KPI | Последнее значение | Guidance/ожидание | Ближайшая дата обновления | Что будет позитивным сюрпризом | Что будет негативным сюрпризом | Влияние на акции.
+
+В конце назови 3 KPI с наибольшей важностью и объясни, что рынок уже мог заложить в цену. Указывай источники и даты. Пиши по-русски."""
+
+TRACK_RECORD_PROMPT = """Оцени Management Track Record компании [ТИКЕР] за последние 4 квартала для горизонта 20–60 торговых дней.
+
+Проверь обещания CEO и менеджмента: guidance, операционные цели, сроки запусков, маржу, выручку, объёмы, CAPEX, FCF и ключевые KPI — только те показатели, которые компания действительно раскрывала.
+
+Дай таблицу:
+Обещание/KPI | Когда заявлено | Срок | Фактический результат | Выполнено/частично/не выполнено | Комментарий.
+
+Затем оцени:
+- качество execution: High/Medium/Low;
+- качество коммуникации с рынком: High/Medium/Low;
+- есть ли повторяющиеся переносы сроков, завышенный guidance или смена приоритетов;
+- как этот track record влияет на доверие к ближайшему MOP.
+
+Пиши по-русски, с источниками и датами; отделяй факты от интерпретаций."""
+
+BOARD_PROMPT = """Проведи краткую оценку Board of Directors компании [ТИКЕР] для инвестора с горизонтом 20–60 торговых дней.
+
+Используй последний proxy statement (DEF 14A), 10-K и официальные сообщения. Оцени:
+- независимость board;
+- концентрацию влияния CEO/основателя;
+- релевантность опыта директоров;
+- ключевые комитеты: audit, compensation, nomination;
+- конфликты интересов, related-party transactions, необычные практики вознаграждения;
+- недавние смены директоров, борьбу за контроль, активизм, M&A или иные governance-события.
+
+Итог:
+Board quality: Strong/Adequate/Weak.
+Есть ли governance-риск для акции в следующие 20–60 дней: да/нет.
+Главный вывод в 3 предложениях.
+
+Не перечисляй биографии без связи с рисками или катализаторами. Указывай источники и даты."""
+
+INSIDER_PROMPT = """Проанализируй Insider Stock & Stock Option Ownership компании [ТИКЕР].
+
+Используй последний proxy statement/DEF 14A и актуальные SEC Forms 3, 4 и 5. Разделяй:
+- прямое владение акциями;
+- RSU/PSU и иные granted/vested awards;
+- опционы: число, strike, дата истечения и степень «в деньгах/вне денег», если данные доступны;
+- открытые рыночные покупки и продажи;
+- продажи из-за налогов, исполнения опционов или заранее утверждённого 10b5-1 plan — не трактуй их автоматически как bearish-сигнал.
+
+Дай таблицу по CEO, CFO, ключевым руководителям и директорам:
+Инсайдер | Акции | Опционы/награды | Изменение за 6–12 месяцев | Тип сделки | Интерпретация.
+
+В конце укажи:
+1) alignment management с акционерами: High/Medium/Low;
+2) есть ли необычный кластер покупок/продаж;
+3) значение для акций на горизонте 20–60 дней.
+
+Пиши по-русски, с датами и первоисточниками."""
+
+ANALYST_PROMPT = """Проанализируй Research Analyst Estimates, Target Price Range и Ratings по компании [ТИКЕР] для горизонта 20–60 торговых дней.
+
+Используй актуальные доступные данные и укажи дату среза. Собери:
+- консенсус по revenue, EPS и ключевым KPI на ближайший квартал и финансовый год;
+- изменения оценок за последние 30, 60 и 90 дней;
+- число Buy/Hold/Sell, если доступно;
+- средний, медианный, минимальный и максимальный target price;
+- implied upside/downside от текущей цены;
+- последние upgrades/downgrades и причины;
+- разброс оценок и главный предмет разногласий аналитиков.
+
+Дай таблицу:
+Метрика | Консенсус | Диапазон оценок | Изменение за 30/60/90 дней | Что важно для акции.
+
+В конце ответь:
+1) ожидания аналитиков повышаются, стабильны или ухудшаются;
+2) какая метрика создаёт наибольший риск earnings surprise;
+3) насколько позитивный/негативный сценарий уже отражён в цене;
+4) вывод для 20–60 торговых дней: bullish/neutral/bearish.
+
+Не используй target price как самостоятельный сигнал к покупке. Указывай источники и даты."""
+
+# Промты для стадий Qualitative Assessment. Длинный русский текст не помещается
+# в URL Google-поиска (кириллица кодируется в 4–6 раз длиннее, лимит ~2048
+# символов), поэтому такие стадии показывают копируемый текст в webview.
+STAGE_PROMPTS = {
+    0: ('MOP', MOP_PROMPT),
+    1: ('KPI', KPI_PROMPT),
+    2: ('Management Track Record', TRACK_RECORD_PROMPT),
+    3: ('Board of Directors', BOARD_PROMPT),
+    4: ('Insider Stock & Option Ownership', INSIDER_PROMPT),
+    5: ('Research Analyst Estimates, Range and Ratings', ANALYST_PROMPT),
+}
+
+_PROMPT_PAGE = """<html><head><meta charset="utf-8"></head>
+<body style="background:#1e1f24;color:#dcdce0;font-family:sans-serif;margin:16px">
+<h2 style="color:#dcdce0">{title} prompt — {ticker}</h2>
+<textarea id="prompt" readonly style="width:100%;height:70vh;background:#26272d;
+color:#dcdce0;border:1px solid #43464f;border-radius:6px;padding:10px;
+font-size:13px;box-sizing:border-box;resize:vertical">{prompt}</textarea><br>
+<button onclick="copy()" style="background:#3a6ea5;color:white;border:none;
+padding:8px 16px;border-radius:6px;cursor:pointer;margin-top:8px">Копировать</button>
+<span id="status" style="color:#8bc34a;margin-left:12px"></span>
+<script>
+function copy() {{
+  var t = document.getElementById('prompt');
+  t.focus();
+  t.select();
+  t.setSelectionRange(0, t.value.length);
+  var ok = false;
+  try {{ ok = document.execCommand('copy'); }} catch (e) {{}}
+  document.getElementById('status').textContent =
+      ok ? 'Скопировано!' : 'Выделите текст вручную (Ctrl+C)';
+}}
+</script>
+</body></html>"""
 
 
 class GoatAssistant(QWidget):
@@ -234,8 +371,8 @@ class QualitativeAssessmentDialog(QDialog):
         self.showMaximized()
 
         self._current_stage = -1
-        self._ratings = [0, 0, 0]
-        self._notes = ['', '', '']
+        self._ratings = [0] * len(STAGES)
+        self._notes = [''] * len(STAGES)
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
@@ -319,8 +456,8 @@ class QualitativeAssessmentDialog(QDialog):
         self._ticker = self.tickerEdit.text().strip()
         self._plans_list = self._plans(self._ticker or 'stock')
         self._current_stage = -1
-        self._ratings = [0, 0, 0]
-        self._notes = ['', '', '']
+        self._ratings = [0] * len(STAGES)
+        self._notes = [''] * len(STAGES)
         self.nextButton.setEnabled(True)
         self.notesButton.setEnabled(True)
         self.starRating.setEnabled(True)
@@ -386,6 +523,18 @@ class QualitativeAssessmentDialog(QDialog):
         query = self._plans_list[self._current_stage]
         self.nextButton.setText(
             'Finish' if self._current_stage == len(STAGES) - 1 else 'Next')
+        if self._current_stage in STAGE_PROMPTS:
+            title, prompt = STAGE_PROMPTS[self._current_stage]
+            ticker = self._ticker or 'N/A'
+            prompt = prompt.replace('[ТИКЕР]', ticker)
+            page = _PROMPT_PAGE.format(title=html.escape(title),
+                                       ticker=html.escape(ticker),
+                                       prompt=html.escape(prompt))
+            if QWebEngineView is not None:
+                self.webView.setHtml(page)
+            else:
+                self.webView.setText(prompt)
+            return
         if QWebEngineView is not None:
             url = 'https://www.google.com/search?q=' + quote_plus(query) + '&udm=50'
             self.webView.load(url)
