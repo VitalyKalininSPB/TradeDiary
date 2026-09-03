@@ -45,7 +45,13 @@ DB_PATH = os.path.join(_DIR, 'sector_quant.db')
 TTL_HOURS = 24
 WINDOW_1M_DAYS = 30
 WINDOW_3M_DAYS = 90
-PRUNE_DAYS = 500
+PRUNE_DAYS = 600
+
+# YoY-маржа считается по самому старому снапшоту в кэше, если его возраст
+# попадает в это окно. Бэкфилл из Wayback Machine даёт ~годовой снапшот сразу.
+_YOY_MIN_DAYS = 200
+_YOY_MAX_DAYS = 530
+_WAYBACK_AVAIL = 'https://archive.org/wayback/available'
 
 # Прозрачные параметры скоринга.
 WEIGHT_PROFIT = 0.6
@@ -78,11 +84,8 @@ def _conn():
 
 
 # --------------------------------------------------------------------- fetch
-def fetch_sector_stats(slug):
-    """Fetch `stats:{...}` aggregate for a sector as a dict. Raises on failure."""
-    r = requests.get(_URL.format(slug=slug), headers=_UA, timeout=25)
-    r.raise_for_status()
-    html = r.text
+def _parse_stats(html):
+    """Extract the aggregate `stats:{...}` block as a dict, or None."""
     m = re.search(r'stats:\{(.*?)\},text:', html, re.DOTALL)
     blob = m.group(1) if m else html
     net = _grab(r'netIncome:([0-9.]+)', blob)
@@ -91,16 +94,70 @@ def fetch_sector_stats(slug):
     ch1y = _grab(r'ch1y:(-?[0-9.]+)', blob)
     ch_ytd = _grab(r'chYTD:(-?[0-9.]+)', blob)
     name = _grab(r'sector_name:"([^"]+)"', blob)
-    if (net is None or revenue is None or ch1m is None
-            or ch1y is None or ch_ytd is None or name is None):
-        raise ValueError('нет блока stats на странице {}'.format(slug))
+    if None in (net, revenue, ch1m, ch1y, ch_ytd):
+        return None
     net, revenue, ch1m, ch1y, ch_ytd = (float(v) for v in
                                          (net, revenue, ch1m, ch1y, ch_ytd))
     if not all(_finite(v) for v in (net, revenue, ch1m, ch1y, ch_ytd)) \
             or net <= 0 or revenue <= 0:
-        raise ValueError('битые значения в блоке stats для {}'.format(slug))
+        return None
     return {'name': name, 'net_income': net, 'revenue': revenue,
             'ch1m': ch1m, 'ch1y': ch1y, 'ch_ytd': ch_ytd}
+
+
+def fetch_sector_stats(slug):
+    """Fetch `stats:{...}` aggregate for a sector as a dict. Raises on failure."""
+    r = requests.get(_URL.format(slug=slug), headers=_UA, timeout=25)
+    r.raise_for_status()
+    stats = _parse_stats(r.text)
+    if stats is None:
+        raise ValueError('нет блока stats на странице {}'.format(slug))
+    return stats
+
+
+def backfill_sector_history(slug):
+    """Fetch an archived ~1-year-old snapshot for a sector from the Wayback
+    Machine and store it (real published data) so YoY margin works immediately.
+
+    No-op when a snapshot old enough already exists. Network — background only.
+    """
+    today = datetime.date.today()
+    for d, *_ in load_series(slug):
+        if _YOY_MIN_DAYS <= (today - d).days <= _YOY_MAX_DAYS:
+            return
+    best = None
+    for offset in (365, 300, 400):
+        target = today - datetime.timedelta(days=offset)
+        try:
+            r = requests.get(_WAYBACK_AVAIL,
+                             params={'url': _URL.format(slug=slug),
+                                     'timestamp': target.strftime('%Y%m%d')},
+                             headers=_UA, timeout=20)
+            snap = r.json().get('archived_snapshots', {}).get('closest')
+        except Exception:  # noqa: BLE001
+            continue
+        if not snap or not snap.get('available'):
+            continue
+        snap_date = datetime.datetime.strptime(
+            snap['timestamp'], '%Y%m%d%H%M%S').date()
+        age = (today - snap_date).days
+        if not (_YOY_MIN_DAYS <= age <= _YOY_MAX_DAYS):
+            continue
+        if best is None or abs(age - 365) < best[0]:
+            best = (abs(age - 365), snap_date, snap['timestamp'])
+    if best is None:
+        return
+    _, snap_date, snap_ts = best
+    try:
+        r = requests.get('https://web.archive.org/web/{}/{}'.format(
+            snap_ts, _URL.format(slug=slug)), headers=_UA, timeout=40)
+        r.raise_for_status()
+        stats = _parse_stats(r.text)
+    except Exception:  # noqa: BLE001
+        return
+    if stats is None:
+        return
+    save_snapshot(slug, stats, snap_date)
 
 
 def _grab(pattern, text):
@@ -257,6 +314,19 @@ def _blend(s1, s2, w1, w2):
     return sum(w * s for w, s in parts) / used if used else None
 
 
+def _percentile(v, values):
+    """Cross-sectional percentile rank (0..100) of `v` among `values`.
+
+    Uses (count_less + 0.5·count_equal) / n. None for missing input.
+    """
+    present = [x for x in values if x is not None]
+    if v is None or not present:
+        return None
+    less = sum(1 for x in present if x < v)
+    eq = sum(1 for x in present if x == v)
+    return (less + 0.5 * eq) / len(present) * 100.0
+
+
 def _tier(score):
     if score is None:
         return 'n/a'
@@ -279,12 +349,16 @@ def compute_scores(series_map):
       profit    = tanh(rel net margin),  net margin = netIncome/revenue,
                   cross-sectionally relative;
       momentum  = 0.6·tanh(rel ch1m) + 0.4·tanh(rel ch1y), relative to sectors.
-    Once enough daily snapshots accumulate, net-income revisions (rev_1m/rev_3m)
-    and chYTD-based 3m momentum are computed too and kept in the result.
+    Additionally the Profitability Improvement Score (PIS) is reported:
+      PIS = 50%·percentile(net margin TTM) + 50%·percentile(margin YoY, pp).
+    The YoY component needs ~1y of cached snapshots; until then PIS degrades to
+    the single available percentile. Once snapshots accumulate, the net-income
+    revisions (rev_1m/rev_3m) and chYTD-based 3m momentum are computed too.
     """
     import math
     rows_by_slug = {}
     margin_by_slug = {}
+    yoy_by_slug = {}
     mom_1m_by_slug = {}
     mom_1y_by_slug = {}
     for slug, (name, rows) in series_map.items():
@@ -292,6 +366,14 @@ def compute_scores(series_map):
             continue
         _d, ni, revenue, ch1m, ch1y, ytd = rows[-1]
         margin = (ni / revenue * 100.0) if revenue else None
+        margin_series = [(d, n / r * 100.0) for d, n, r, _c, _y, _t in rows
+                         if r]
+        oldest_margin = margin_series[0] if margin_series else None
+        margin_yoy_pp = None
+        if margin is not None and oldest_margin is not None:
+            age = (datetime.date.today() - oldest_margin[0]).days
+            if _YOY_MIN_DAYS <= age <= _YOY_MAX_DAYS:
+                margin_yoy_pp = margin - oldest_margin[1]
         ni_1m = _latest_at([(d, v) for d, v, _r, _c, _y, _t in rows],
                            WINDOW_1M_DAYS)
         ni_3m = _latest_at([(d, v) for d, v, _r, _c, _y, _t in rows],
@@ -301,19 +383,28 @@ def compute_scores(series_map):
         rev_1m = _pct_change(ni, ni_1m)
         rev_3m = _pct_change(ni, ni_3m)
         mom_3m = _ch_ytd_3m(ytd, ytd_row)
-        rows_by_slug[slug] = (name, ni, revenue, margin, ch1m, ch1y,
-                              rev_1m, rev_3m, mom_3m)
+        rows_by_slug[slug] = (name, ni, revenue, margin, margin_yoy_pp,
+                              ch1m, ch1y, rev_1m, rev_3m, mom_3m)
         margin_by_slug[slug] = margin
+        yoy_by_slug[slug] = margin_yoy_pp
         mom_1m_by_slug[slug] = ch1m
         mom_1y_by_slug[slug] = ch1y
 
     rel_margin = _rel(margin_by_slug)
     rel_mom_1m = _rel(mom_1m_by_slug)
     rel_mom_1y = _rel(mom_1y_by_slug)
+    margin_vals = list(margin_by_slug.values())
+    yoy_vals = list(yoy_by_slug.values())
+    p_margin_by_slug = {s: _percentile(margin_by_slug[s], margin_vals)
+                        for s in margin_by_slug}
+    p_yoy_by_slug = {s: _percentile(yoy_by_slug[s], yoy_vals)
+                     for s in yoy_by_slug}
+    pis_by_slug = {s: _blend(p_margin_by_slug[s], p_yoy_by_slug[s], 0.5, 0.5)
+                   for s in margin_by_slug}
 
     results = []
-    for slug, (name, ni, revenue, margin, ch1m, ch1y, rev_1m, rev_3m,
-               mom_3m) in rows_by_slug.items():
+    for slug, (name, ni, revenue, margin, margin_yoy_pp, ch1m, ch1y,
+               rev_1m, rev_3m, mom_3m) in rows_by_slug.items():
         profit = None
         if rel_margin[slug] is not None:
             profit = math.tanh(rel_margin[slug] / SCALE_PROFIT)
@@ -330,6 +421,10 @@ def compute_scores(series_map):
         results.append({
             'slug': slug, 'sector': name, 'net_income': ni,
             'revenue': revenue, 'net_margin': margin,
+            'margin_yoy_pp': margin_yoy_pp,
+            'p_margin': p_margin_by_slug[slug],
+            'p_yoy': p_yoy_by_slug[slug],
+            'pis': pis_by_slug[slug],
             'rev_1m': rev_1m, 'rev_3m': rev_3m,
             'mom_1m': ch1m, 'mom_1y': ch1y, 'mom_3m': mom_3m,
             'rel_mom_1m': rel_mom_1m[slug], 'rel_mom_1y': rel_mom_1y[slug],
@@ -376,6 +471,12 @@ def run_sector_quant(force=False):
             fetched[slug] = (name, stats)
         except Exception as e:  # noqa: BLE001 - one bad sector must not kill all
             errors.append('{}: {}'.format(name, e))
+
+    for slug, name in SECTORS:
+        try:
+            backfill_sector_history(slug)
+        except Exception as e:  # noqa: BLE001 - backfill must not break the run
+            errors.append('{}: wayback {}'.format(name, e))
 
     series_map = {}
     for slug, name in SECTORS:

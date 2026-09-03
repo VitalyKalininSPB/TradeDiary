@@ -13,8 +13,9 @@ _TIER_COLORS = {
     'n/a': '#3a3c46',
 }
 
-_HEADERS = ['Rank', 'Sector', 'Net Margin %', 'Rev 1M %', 'Rev 3M %',
-            'Rel Mom 1M %', 'Rel Mom 1Y %', 'Profit', 'Momentum', 'Score',
+_HEADERS = ['Rank', 'Sector', 'Net Margin %', 'Margin YoY pp',
+            'Profitability %', 'Rev 1M %', 'Rev 3M %', 'Rel Mom 1M %',
+            'Rel Mom 1Y %', 'Momentum', 'Relative Profitability', 'Score',
             'Tier']
 
 
@@ -44,7 +45,7 @@ class SectorQuantDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Sector Quantitative Assessment')
-        self.resize(1000, 620)
+        self.resize(1560, 660)
 
         root = QtWidgets.QVBoxLayout(self)
 
@@ -116,22 +117,24 @@ class SectorQuantDialog(QtWidgets.QDialog):
                 s.get('rank') if s.get('rank') is not None else '-',
                 s.get('sector', ''),
                 self._fmt(s.get('net_margin'), '%'),
+                self._fmt(s.get('margin_yoy_pp'), 'pp'),
+                self._fmt(s.get('pis')),
                 self._fmt(s.get('rev_1m'), '%'),
                 self._fmt(s.get('rev_3m'), '%'),
                 self._fmt(s.get('rel_mom_1m'), '%'),
                 self._fmt(s.get('rel_mom_1y'), '%'),
-                self._fmt(s.get('profit')),
                 self._fmt(s.get('momentum')),
+                self._fmt(s.get('profit')),
                 self._fmt(s.get('score')),
                 s.get('tier', ''),
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))
-                if c == 10:
+                if c == 12:
                     color = _TIER_COLORS.get(v, _TIER_COLORS['n/a'])
                     item.setBackground(QtGui.QColor(color))
                     item.setForeground(QtGui.QColor('#ffffff'))
-                elif c in (7, 8, 9):
+                elif c in (9, 10, 11):
                     item.setForeground(QtGui.QColor(_TXT))
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()
