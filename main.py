@@ -242,6 +242,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
         self.macroButton.clicked.connect(self.macroClicked)
         self.indexButton.clicked.connect(self.indexClicked)
+        self.commoditiesButton.clicked.connect(self.commoditiesClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
@@ -460,6 +461,14 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._dialogs_set().add(dlg)
         dlg.show()
 
+    def commoditiesClicked(self):
+        """Open the commodities overview dialog (tabbed indicator charts)."""
+        from commodities_dialog import CommoditiesDialog
+        dlg = CommoditiesDialog(self)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
     def clearDbClicked(self):
         ret = QtWidgets.QMessageBox.question(
             self.window(), 'Clear DB',
@@ -577,7 +586,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row1.setContentsMargins(0, 0, 0, 0)
         bottom_row1.setSpacing(8)
         for w in (self.macroLabel, self.macroProgressBar, self.macroRegimeLabel,
-                  self.macroButton, self.indexButton,
+                  self.macroButton, self.indexButton, self.commoditiesButton,
                   self.corrLabel, self.corrProgressBar, self.corrCommentLabel,
                   self.correlationMatrixButton):
             bottom_row1.addWidget(w)
