@@ -219,6 +219,23 @@ class _MacroRefreshThread(QtCore.QThread):
         self.finished_ok.emit(score, note, regime, late_cycle, fomc_new)
 
 
+class _QuantAlertThread(QtCore.QThread):
+    """Background check for sector signal changes at app startup (≤1 per 3 days)."""
+
+    done = QtCore.Signal()
+
+    def run(self):
+        try:
+            from quant_alerts import should_startup_check, mark_startup_check
+            if should_startup_check():
+                from sector_quant import run_sector_quant
+                run_sector_quant(force=False)
+                mark_startup_check()
+        except Exception as e:  # noqa: BLE001 - never break startup
+            print('Quant alerts: {}'.format(e))
+        self.done.emit()
+
+
 class TradeDiary(QtWidgets.QMainWindow):
     def __init__(self):
         super(TradeDiary, self).__init__()
@@ -529,6 +546,12 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._macroThread = _MacroRefreshThread(self)
         self._macroThread.finished_ok.connect(self._onMacroRefreshed)
         self._macroThread.start()
+        self._quantAlertThread = _QuantAlertThread(self)
+        self._quantAlertThread.done.connect(self._on_quant_alerts_done)
+        self._quantAlertThread.start()
+
+    def _on_quant_alerts_done(self):
+        self._show_advice_goat()
 
     def _onMacroRefreshed(self, value, note, regime, late_cycle, fomc_new):
         """Apply background-computed values (runs on the UI thread)."""
@@ -755,9 +778,26 @@ class TradeDiary(QtWidgets.QMainWindow):
                       'FOMC. Откройте «Statements», чтобы прочитать.')
         elif getattr(self, '_late_cycle', False):
             advice = self._LATE_CYCLE_GOAT_TEXT
+        else:
+            from quant_alerts import new_events, mark_all_seen
+            events = new_events()
+            if events:
+                sectors = sum(1 for e in events if e['kind'] == 'sector_signal')
+                companies = sum(1 for e in events if e['kind'] == 'company_score')
+                parts = []
+                if sectors:
+                    parts.append('{} секторов изменили сигнал'.format(sectors))
+                if companies:
+                    parts.append('{} компаний изменили score'.format(companies))
+                detail = '\n'.join(e['message'] for e in events[:3])
+                advice = ('Quant alerts: {}. {}'.format(
+                    ', '.join(parts), detail or ''))
+                mark_all_seen()
         if not advice:
             return
-        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=5000)
+        self._goat = GoatAssistant('', self, advice=advice,
+                                   auto_hide_ms=8000 if 'Quant alerts' in advice
+                                   else 5000)
         self._goat.show()
 
     def deleteClicked(self, row):

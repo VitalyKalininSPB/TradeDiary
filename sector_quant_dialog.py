@@ -105,17 +105,22 @@ class SectorQuantDialog(QtWidgets.QDialog):
 
         row = QtWidgets.QHBoxLayout()
         self.refreshButton = QtWidgets.QPushButton('Refresh')
+        self.companiesButton = QtWidgets.QPushButton('View companies')
         self.closeButton = QtWidgets.QPushButton('Close')
         row.addWidget(self.refreshButton)
+        row.addWidget(self.companiesButton)
         row.addStretch(1)
         row.addWidget(self.closeButton)
         root.addLayout(row)
 
         self.refreshButton.clicked.connect(lambda: self._start(force=True))
+        self.companiesButton.clicked.connect(self._view_companies)
+        self.companiesButton.setEnabled(False)
         self.closeButton.clicked.connect(self.close)
 
         self._thread = None
         self._payload = None
+        self._current_sector = None
         self._load_cached()
         self._start(force=False)
 
@@ -137,6 +142,11 @@ class SectorQuantDialog(QtWidgets.QDialog):
     def _on_finished(self, payload):
         self.refreshButton.setEnabled(True)
         self._render(payload, from_cache=False)
+        events = payload.get('sector_events') or []
+        if events:
+            self._show_goat(
+                '{} секторов изменили сигнал:\n'.format(len(events))
+                + '\n'.join(e['message'] for e in events[:4]))
 
     def _on_failed(self, error):
         self.refreshButton.setEnabled(True)
@@ -190,10 +200,14 @@ class SectorQuantDialog(QtWidgets.QDialog):
     def _show_details(self, s):
         if s is None:
             self.detail.setPlainText('')
+            self._current_sector = None
+            self.companiesButton.setEnabled(False)
             return
         st = s.get('status') or {}
         signal = st.get('status', '-')
         sector = s.get('sector', '')
+        self._current_sector = sector
+        self.companiesButton.setEnabled(True)
         rel_pp = s.get('rel_margin_pp')
         if rel_pp is None:
             rel_line = '• Net Margin: {}'.format(self._fmt(s.get('net_margin'), '%'))
@@ -224,6 +238,24 @@ class SectorQuantDialog(QtWidgets.QDialog):
         ]
         self.detail.setPlainText('\n'.join(lines))
 
+    def _view_companies(self):
+        if not self._current_sector:
+            return
+        from company_dialog import CompanyScreenDialog
+        dlg = CompanyScreenDialog(self._current_sector, self.window())
+        dlg.exec()
+
+    def _show_goat(self, advice):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+            self._goat = None
+        if not advice:
+            return
+        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=8000)
+        self._goat.show()
+
     @staticmethod
     def _fmt(value, suffix=''):
         if value is None:
@@ -235,4 +267,8 @@ class SectorQuantDialog(QtWidgets.QDialog):
     def closeEvent(self, event):
         if self._thread is not None and self._thread.isRunning():
             self._thread.wait(5000)
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+            self._goat = None
         super().closeEvent(event)

@@ -296,17 +296,18 @@ def _ch_ytd_3m(ch_ytd_now, row_90d):
 
 # 2×2-статус из двух компонент: Profitability (High/Low) × Momentum
 # (Positive/Negative). Полный смысл — именно в связке, а не в одном Score.
+# Формат: (status_en, status_ru, action_en, action_id).
 _STATUS_BY_QUAD = {
     (True, True): ('Confirmed strength', 'Хорошая рентабельность подтверждается ценой',
-                   'Priority long research'),
+                   'Priority long research', 'priority_long_research'),
     (True, False): ('Quality under pressure',
                     'Прибыльность высокая, но рынок сектор не поддерживает',
-                    'Watchlist; выяснить причину'),
+                    'Watchlist; выяснить причину', 'watchlist'),
     (False, True): ('Price-led recovery',
                     'Цена сильна при слабой текущей profitability',
-                    'Проверить циклическое улучшение'),
+                    'Проверить циклическое улучшение', 'investigate_catalyst'),
     (False, False): ('Confirmed weakness', 'И рентабельность, и цена слабые',
-                     'Exclude from long research'),
+                     'Exclude from long research', 'exclude_from_long'),
 }
 
 
@@ -321,9 +322,10 @@ def quad_status(profit, momentum):
         return None
     hi = profit >= 0.0
     pos = momentum >= 0.0
-    en, ru, action = _STATUS_BY_QUAD[(hi, pos)]
+    en, ru, action, action_id = _STATUS_BY_QUAD[(hi, pos)]
     return {'status': en, 'status_ru': ru, 'action': action,
-            'profit_high': hi, 'momentum_positive': pos}
+            'action_id': action_id, 'profit_high': hi,
+            'momentum_positive': pos}
 
 
 def _rel(values_by_slug):
@@ -529,10 +531,20 @@ def run_sector_quant(force=False):
 
     prune_old(today)
     sectors = compute_scores(series_map)
+    sector_events = []
+    prev_payload = load_result()
+    if prev_payload is not None:
+        from quant_alerts import record_sector_signal_change
+        try:
+            sector_events = record_sector_signal_change(
+                prev_payload.get('sectors', []), sectors)
+        except Exception as e:  # noqa: BLE001 - alerts must not break the run
+            print('Sector alerts: {}'.format(e))
     payload = {
         'computed_at': datetime.datetime.now().isoformat(),
         'data_date': today.isoformat(),
         'source': 'stockanalysis.com',
+        'sector_events': sector_events,
         'params': {
             'weight_profit': WEIGHT_PROFIT,
             'weight_momentum': WEIGHT_MOMENTUM,

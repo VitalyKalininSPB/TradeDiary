@@ -435,18 +435,30 @@ class QualitativeAssessmentDialog(QDialog):
             self._begin_assessment()
 
     def _add_to_watchlist(self):
-        from watchlist import add as watchlist_add
         ticker = self._ticker or ''
-        if watchlist_add(ticker):
-            self.beginButton.setText('Added to Watchlist')
-            self.beginButton.setEnabled(False)
-            QtWidgets.QMessageBox.information(
-                self, 'Watchlist',
-                '{} добавлен в watchlist.'.format(ticker.upper()))
-        else:
-            QtWidgets.QMessageBox.information(
-                self, 'Watchlist',
-                '{} уже в watchlist или тикер пустой.'.format(ticker.upper() or 'N/A'))
+        if not ticker:
+            return
+        import datetime
+        from watchlist import add as watchlist_add
+        ratings = [r for r in self._ratings if r > 0]
+        qual = (sum(ratings) / len(ratings)) if ratings else 0.0
+        snapshot = {'qual': round(qual, 2),
+                    'date': datetime.date.today().isoformat()}
+        from watchlist_dialog import WatchlistEntryDialog
+        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snapshot,
+                                   parent=self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        v = dlg.values()
+        res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'],
+                            snapshot=snapshot)
+        self.beginButton.setText('Added to Watchlist')
+        self.beginButton.setEnabled(False)
+        QtWidgets.QMessageBox.information(
+            self, 'Watchlist',
+            '{} {} в watchlist (Qual {:.2f}/5).'.format(
+                v['ticker'],
+                'добавлен' if res == 'added' else 'обновлён', qual))
 
     def _begin_assessment(self):
         self._ticker = self.tickerEdit.text().strip()
