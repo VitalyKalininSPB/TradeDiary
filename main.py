@@ -915,10 +915,12 @@ class TradeDiary(QtWidgets.QMainWindow):
                 'Nothing recalculated.' + ((' Skipped: ' + ', '.join(skipped)) if skipped else ''))
 
     def quantitiveAssessmentClicked(self):
-        QtWidgets.QMessageBox.information(
-            self.window(), 'Quantitative Assessment',
-            'Quantitative assessment placeholder.\n'
-            'This is a regular screener, but with hints on which criteria to screen for.')
+        from sector_quant_dialog import SectorQuantDialog
+        dlg = SectorQuantDialog(self)
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
 
     def qualitativeAssessmentClicked(self):
         from qualitative_dialog import QualitativeAssessmentDialog
