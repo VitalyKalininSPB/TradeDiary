@@ -2,7 +2,9 @@ __pycache__/
 *.pyc
 .qtcreator/
 *.db
+*.csv
 opencode.json
 diary.xml
 diary.xml.migrated
+watchlist.json
 assets/advice_goat.png
