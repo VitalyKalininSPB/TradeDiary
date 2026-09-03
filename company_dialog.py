@@ -17,6 +17,13 @@ _LABEL_RU = {
     company_quant.LABEL_LOW_PRIORITY: 'Низкий приоритет',
     company_quant.LABEL_INSUFFICIENT: 'Недостаточно данных',
 }
+# Для Short-вкладки приоритет инвертируется: худшая компания = высший приоритет.
+_LABEL_SHORT_RU = {
+    company_quant.LABEL_RESEARCH_PRIORITY: 'Низкий приоритет (short)',
+    company_quant.LABEL_WATCHLIST: 'Наблюдать (short)',
+    company_quant.LABEL_LOW_PRIORITY: 'Высокий приоритет (short)',
+    company_quant.LABEL_INSUFFICIENT: 'Недостаточно данных',
+}
 
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
             'Rel Momentum 1M', 'Rel Momentum 1Y', 'Company Score',
@@ -164,7 +171,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 'Компании изменили score:\n' + '\n'.join(
                     e['message'] for e in events[:4]))
         self._fill(self.longTable, long_rows, '_long_rank')
-        self._fill(self.shortTable, short_rows, '_short_rank')
+        self._fill(self.shortTable, short_rows, '_short_rank', short=True)
         self._long_rows = long_rows
         self._short_rows = short_rows
         self._show_company_detail(long_rows[0] if long_rows else None)
@@ -173,7 +180,8 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         rows = self._long_rows if table is self.longTable else self._short_rows
         row = item.row()
         if 0 <= row < len(rows):
-            self._show_company_detail(rows[row])
+            self._show_company_detail(rows[row],
+                                      short=table is self.shortTable)
 
     def _sector_context(self):
         try:
@@ -186,13 +194,13 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 return s
         return None
 
-    def _show_company_detail(self, s):
+    def _show_company_detail(self, s, short=False):
         if s is None:
             self.detail.setPlainText('')
             self.qualButton.setEnabled(False)
             return
         label = s.get('label', company_quant.LABEL_INSUFFICIENT)
-        title = _LABEL_RU.get(label, label)
+        title = (_LABEL_SHORT_RU if short else _LABEL_RU).get(label, label)
         company = s.get('company') or s.get('ticker') or ''
         sr = self._sector_context()
         lines = ['{} — {}'.format(company, title), '']
@@ -249,11 +257,11 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         dlg.tickerEdit.setText(ticker)
         dlg.show()
 
-    def _fill(self, table, rows, rank_key):
+    def _fill(self, table, rows, rank_key, short=False):
         table.setRowCount(len(rows))
         for r, s in enumerate(rows):
             label = s.get('label', company_quant.LABEL_INSUFFICIENT)
-            label_ru = _LABEL_RU.get(label, label)
+            label_ru = (_LABEL_SHORT_RU if short else _LABEL_RU).get(label, label)
             vals = [
                 s.get(rank_key) if s.get(rank_key) is not None else '-',
                 s.get('ticker') or '-',
