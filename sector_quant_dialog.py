@@ -3,20 +3,51 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import sector_quant
 
-_BG = '#1e1f24'
 _TXT = '#dcdce0'
 _TIER_COLORS = {
     'Strong': '#2e7d32',
     'Positive': '#1f6f3f',
+    'Neutral': '#3a5a8c',
     'Weak': '#9a6b1f',
     'Negative': '#b71c1c',
     'n/a': '#3a3c46',
 }
+_STATUS_COLORS = {
+    'Confirmed strength': '#2e7d32',
+    'Quality under pressure': '#9a6b1f',
+    'Price-led recovery': '#3a5a8c',
+    'Confirmed weakness': '#b71c1c',
+}
 
-_HEADERS = ['Rank', 'Sector', 'Net Margin %', 'Margin YoY pp',
-            'Profitability %', 'Rev 1M %', 'Rev 3M %', 'Rel Mom 1M %',
-            'Rel Mom 1Y %', 'Momentum', 'Relative Profitability', 'Score',
-            'Tier']
+_HEADERS = ['Rank', 'Sector', 'Signal', 'Score', 'Next step']
+
+# «Следующий шаг» в главной таблице и развёрнутый текст деталей по статусу.
+_NEXT_STEP = {
+    'Confirmed strength': 'Приоритет для исследования long-кандидатов',
+    'Quality under pressure': 'Наблюдать; проверить расхождение сигналов',
+    'Price-led recovery': 'Проверить катализатор',
+    'Confirmed weakness': 'Исключить из поиска long-кандидатов',
+}
+_PRIORITY = {
+    'Confirmed strength': 'High',
+    'Quality under pressure': 'Medium',
+    'Price-led recovery': 'Medium',
+    'Confirmed weakness': 'Low',
+}
+_NEXT_STEP_DETAIL = {
+    'Confirmed strength':
+        'Посмотреть компании {sector} и выбрать те, у которых качественные '
+        'финансовые показатели и нет явных qualitative red flags.',
+    'Quality under pressure':
+        'Разобраться, почему рынок не поддерживает сильную рентабельность '
+        '{sector}: проверьте макро- и секторные факторы, свежие отчёты и guidance.',
+    'Price-led recovery':
+        'Проверить, действительно ли в {sector} начинается циклическое '
+        'улучшение прибыльности (маржа, заказы, guidance).',
+    'Confirmed weakness':
+        '{sector} пока исключён из поиска long-кандидатов — дождитесь '
+        'разворота рентабельности и momentum.',
+}
 
 
 class _SectorQuantThread(QtCore.QThread):
@@ -38,14 +69,13 @@ class _SectorQuantThread(QtCore.QThread):
 
 
 class SectorQuantDialog(QtWidgets.QDialog):
-    """Sector Quantitative Assessment: ranked GICS sectors by profit revision
-    and relative momentum. Draws the last saved result instantly, then
-    recomputes in the background (the "GDP-style" cached pattern)."""
+    """Sector Quantitative Assessment: 5-column summary (Rank, Sector, Signal,
+    Score, Next step) + a detail panel opened by clicking a sector."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Sector Quantitative Assessment')
-        self.resize(1560, 660)
+        self.resize(900, 720)
 
         root = QtWidgets.QVBoxLayout(self)
 
@@ -58,8 +88,20 @@ class SectorQuantDialog(QtWidgets.QDialog):
         self.table.setEditTriggers(
             QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
-        root.addWidget(self.table, 1)
+        self.table.itemClicked.connect(self._on_item_clicked)
+        root.addWidget(self.table, 3)
+
+        self.detail = QtWidgets.QTextBrowser()
+        self.detail.setStyleSheet(
+            'background: #1e1f24; color: {}; border: 1px solid #43464f;'
+            .format(_TXT))
+        self.detail.setOpenExternalLinks(False)
+        root.addWidget(self.detail, 2)
 
         row = QtWidgets.QHBoxLayout()
         self.refreshButton = QtWidgets.QPushButton('Refresh')
@@ -73,6 +115,7 @@ class SectorQuantDialog(QtWidgets.QDialog):
         self.closeButton.clicked.connect(self.close)
 
         self._thread = None
+        self._payload = None
         self._load_cached()
         self._start(force=False)
 
@@ -103,6 +146,7 @@ class SectorQuantDialog(QtWidgets.QDialog):
             self.infoLabel.setText('Нет данных. ' + error)
 
     def _render(self, payload, from_cache=False):
+        self._payload = payload
         sectors = payload.get('sectors', [])
         errors = payload.get('errors', [])
         err_note = ('; без данных: {}'.format(', '.join(errors))) if errors else ''
@@ -113,31 +157,72 @@ class SectorQuantDialog(QtWidgets.QDialog):
                 payload.get('source', ''), status, err_note))
         self.table.setRowCount(len(sectors))
         for r, s in enumerate(sectors):
+            st = s.get('status') or {}
+            signal = st.get('status', '-')
             vals = [
                 s.get('rank') if s.get('rank') is not None else '-',
                 s.get('sector', ''),
-                self._fmt(s.get('net_margin'), '%'),
-                self._fmt(s.get('margin_yoy_pp'), 'pp'),
-                self._fmt(s.get('pis')),
-                self._fmt(s.get('rev_1m'), '%'),
-                self._fmt(s.get('rev_3m'), '%'),
-                self._fmt(s.get('rel_mom_1m'), '%'),
-                self._fmt(s.get('rel_mom_1y'), '%'),
-                self._fmt(s.get('momentum')),
-                self._fmt(s.get('profit')),
+                signal,
                 self._fmt(s.get('score')),
-                s.get('tier', ''),
+                _NEXT_STEP.get(signal, '-'),
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))
-                if c == 12:
-                    color = _TIER_COLORS.get(v, _TIER_COLORS['n/a'])
+                if c == 2:
+                    color = _STATUS_COLORS.get(signal, _TIER_COLORS['n/a'])
                     item.setBackground(QtGui.QColor(color))
                     item.setForeground(QtGui.QColor('#ffffff'))
-                elif c in (9, 10, 11):
+                    item.setToolTip(st.get('status_ru', ''))
+                elif c == 3:
                     item.setForeground(QtGui.QColor(_TXT))
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()
+        self._show_details(sectors[0] if sectors else None)
+
+    def _on_item_clicked(self, item):
+        if self._payload is None:
+            return
+        sectors = self._payload.get('sectors', [])
+        row = item.row()
+        if 0 <= row < len(sectors):
+            self._show_details(sectors[row])
+
+    def _show_details(self, s):
+        if s is None:
+            self.detail.setPlainText('')
+            return
+        st = s.get('status') or {}
+        signal = st.get('status', '-')
+        sector = s.get('sector', '')
+        rel_pp = s.get('rel_margin_pp')
+        if rel_pp is None:
+            rel_line = '• Net Margin: {}'.format(self._fmt(s.get('net_margin'), '%'))
+        else:
+            rel_line = ('• Net Margin: {}, на {:.1f} п.п. {} среднего по '
+                        'секторам'.format(
+                            self._fmt(s.get('net_margin'), '%'), abs(rel_pp),
+                            'выше' if rel_pp >= 0 else 'ниже'))
+        lines = [
+            '{} — {}'.format(sector, signal),
+            '',
+            'Score: {}'.format(self._fmt(s.get('score'))),
+            'Priority: {}'.format(_PRIORITY.get(signal, '-')),
+            '',
+            'Почему:',
+            rel_line,
+            '• Relative Profitability: {:+.2f}'.format(s.get('profit'))
+            if s.get('profit') is not None else '• Relative Profitability: -',
+            '• Rel Momentum 1M: {:+.1f} п.п.'.format(s.get('rel_mom_1m'))
+            if s.get('rel_mom_1m') is not None else '• Rel Momentum 1M: -',
+            '• Rel Momentum 1Y: {:+.1f} п.п.'.format(s.get('rel_mom_1y'))
+            if s.get('rel_mom_1y') is not None else '• Rel Momentum 1Y: -',
+            '• Momentum: {:+.2f}'.format(s.get('momentum'))
+            if s.get('momentum') is not None else '• Momentum: -',
+            '',
+            'Следующий шаг:',
+            _NEXT_STEP_DETAIL.get(signal, '-').format(sector=sector),
+        ]
+        self.detail.setPlainText('\n'.join(lines))
 
     @staticmethod
     def _fmt(value, suffix=''):

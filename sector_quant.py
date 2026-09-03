@@ -62,8 +62,9 @@ SCALE_PROFIT = 10.0
 SCALE_MOM_1M = 10.0
 SCALE_MOM_1Y = 20.0
 
-TIER_STRONG = 0.4
-TIER_WEAK = -0.4
+TIER_STRONG = 0.50
+TIER_POSITIVE = 0.15
+TIER_NEGATIVE = -0.50
 
 
 def _conn():
@@ -293,6 +294,38 @@ def _ch_ytd_3m(ch_ytd_now, row_90d):
     return ((1.0 + ch_ytd_now / 100.0) / (1.0 + old_v / 100.0) - 1.0) * 100.0
 
 
+# 2×2-статус из двух компонент: Profitability (High/Low) × Momentum
+# (Positive/Negative). Полный смысл — именно в связке, а не в одном Score.
+_STATUS_BY_QUAD = {
+    (True, True): ('Confirmed strength', 'Хорошая рентабельность подтверждается ценой',
+                   'Priority long research'),
+    (True, False): ('Quality under pressure',
+                    'Прибыльность высокая, но рынок сектор не поддерживает',
+                    'Watchlist; выяснить причину'),
+    (False, True): ('Price-led recovery',
+                    'Цена сильна при слабой текущей profitability',
+                    'Проверить циклическое улучшение'),
+    (False, False): ('Confirmed weakness', 'И рентабельность, и цена слабые',
+                     'Exclude from long research'),
+}
+
+
+def quad_status(profit, momentum):
+    """Classify the sector by the two components (2×2 matrix).
+
+    Profitability High when the relative margin component >= 0, Low otherwise;
+    Momentum Positive when its component >= 0, Negative otherwise. None when a
+    component is missing.
+    """
+    if profit is None or momentum is None:
+        return None
+    hi = profit >= 0.0
+    pos = momentum >= 0.0
+    en, ru, action = _STATUS_BY_QUAD[(hi, pos)]
+    return {'status': en, 'status_ru': ru, 'action': action,
+            'profit_high': hi, 'momentum_positive': pos}
+
+
 def _rel(values_by_slug):
     """Cross-sectional relative metric: value minus the sector mean."""
     present = [v for v in values_by_slug.values() if v is not None]
@@ -328,13 +361,17 @@ def _percentile(v, values):
 
 
 def _tier(score):
+    """Tier by Score: Strong ≥+0.50 · Positive +0.15..+0.49 · Neutral −0.14..
+    +0.14 · Weak −0.49..−0.15 · Negative ≤−0.50."""
     if score is None:
         return 'n/a'
     if score >= TIER_STRONG:
         return 'Strong'
-    if score >= 0.0:
+    if score >= TIER_POSITIVE:
         return 'Positive'
-    if score > TIER_WEAK:
+    if score > -TIER_POSITIVE:
+        return 'Neutral'
+    if score > TIER_NEGATIVE:
         return 'Weak'
     return 'Negative'
 
@@ -418,13 +455,16 @@ def compute_scores(series_map):
             score = WEIGHT_PROFIT * profit + WEIGHT_MOMENTUM * momentum
         else:
             score = None
+        status = quad_status(profit, momentum)
         results.append({
             'slug': slug, 'sector': name, 'net_income': ni,
             'revenue': revenue, 'net_margin': margin,
+            'rel_margin_pp': rel_margin[slug],
             'margin_yoy_pp': margin_yoy_pp,
             'p_margin': p_margin_by_slug[slug],
             'p_yoy': p_yoy_by_slug[slug],
             'pis': pis_by_slug[slug],
+            'status': status,
             'rev_1m': rev_1m, 'rev_3m': rev_3m,
             'mom_1m': ch1m, 'mom_1y': ch1y, 'mom_3m': mom_3m,
             'rel_mom_1m': rel_mom_1m[slug], 'rel_mom_1y': rel_mom_1y[slug],
@@ -499,7 +539,8 @@ def run_sector_quant(force=False):
             'w_1m': W_1M, 'w_1y': W_1Y,
             'scale_profit': SCALE_PROFIT,
             'scale_mom_1m': SCALE_MOM_1M, 'scale_mom_1y': SCALE_MOM_1Y,
-            'tier_strong': TIER_STRONG, 'tier_weak': TIER_WEAK,
+            'tier_strong': TIER_STRONG, 'tier_positive': TIER_POSITIVE,
+            'tier_negative': TIER_NEGATIVE,
             'window_1m_days': WINDOW_1M_DAYS, 'window_3m_days': WINDOW_3M_DAYS,
         },
         'errors': errors,
