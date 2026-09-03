@@ -29,8 +29,6 @@ from credit_spread import CreditSpreadTab
 from vix_tab import VixTab
 from mlrci import MlrcTab, compute_mlrci, compute_net_liquidity
 import nfib
-from fomc import FomcTab, load_fomc_statements, unread_count, \
-    refresh_fomc_if_stale
 
 from matplotlib.collections import PolyCollection
 
@@ -341,16 +339,6 @@ def _load_ntfs(series_id):
     """
     series = {sid: _fred(sid) for sid in ('DTB3', 'DGS6MO', 'DGS1', 'DGS2')}
     return compute_ntfs_series(series)
-
-
-def _load_fomc(series_id):
-    """Refresh the FOMC statement feed (background) and return empty chart data.
-
-    `series_id` is accepted for uniformity with the loader thread. The dialog
-    routes the 'FOMC' row to the FomcTab, which reads the cache.
-    """
-    refresh_fomc_if_stale()
-    return [], []
 
 
 def _load_netliq(series_id=None):
@@ -1723,10 +1711,6 @@ class MacroDialog(QDialog):
         self._widgets.append(buffett)
         self._buffett_tab = buffett
 
-        # 13. FOMC statement feed (a list, not a chart).
-        self._fomc_tab = FomcTab(self)
-        ordered.append(('FOMC Statement', self._fomc_tab))
-
         for title, tab in ordered:
             self.tabs.addTab(tab, title)
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1753,9 +1737,6 @@ class MacroDialog(QDialog):
     def _on_row_loaded(self, series_id, dates, values, note):
         if series_id in (_LATE_GDPI, _LATE_CC):
             self._late_data[series_id] = (dates, values)
-            return
-        if series_id == 'FOMC':
-            self._fomc_tab.set_statements(load_fomc_statements())
             return
         if series_id == 'NTFS':
             self._yield_tab.set_ntfs(dates, values)
@@ -1899,10 +1880,6 @@ class MacroDialog(QDialog):
             advice = widget.nfib_advice()
         elif widget is self._sentiment_tab:
             advice = widget.sentiment_advice()
-        elif widget is self._fomc_tab:
-            if unread_count():
-                advice = ('Есть непрочитанные заявления ФРС (FOMC). '
-                          'Нажмите на строку, чтобы прочитать.')
         self._show_goat(advice)
 
     def closeEvent(self, event):
@@ -1930,7 +1907,6 @@ class MacroDialog(QDialog):
         items.append(('MLRCI_MARKS', _load_mlrci_marks))
         items.append(('SP500', _fred))
         items.append(('NTFS', _load_ntfs))
-        items.append(('FOMC', _load_fomc))
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
         self._loader = _ChartLoaderThread(items, self)

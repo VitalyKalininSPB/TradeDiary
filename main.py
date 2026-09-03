@@ -251,6 +251,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.macroButton.clicked.connect(self.macroClicked)
         self.indexButton.clicked.connect(self.indexClicked)
         self.commoditiesButton.clicked.connect(self.commoditiesClicked)
+        self.statementsButton.clicked.connect(self.statementsClicked)
+        self.todayMacroButton.clicked.connect(self.todayMacroClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
@@ -477,6 +479,22 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._dialogs_set().add(dlg)
         dlg.show()
 
+    def statementsClicked(self):
+        """Open the FOMC statements feed dialog."""
+        from fomc import StatementsDialog
+        dlg = StatementsDialog(self)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
+    def todayMacroClicked(self):
+        """Open the embedded browser with today's S&P500/NASDAQ macro events."""
+        from today_macro_dialog import TodayMacroDialog
+        dlg = TodayMacroDialog(self)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
     def clearDbClicked(self):
         ret = QtWidgets.QMessageBox.question(
             self.window(), 'Clear DB',
@@ -597,6 +615,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row1.setSpacing(8)
         for w in (self.macroLabel, self.macroProgressBar, self.macroRegimeLabel,
                   self.macroButton, self.indexButton, self.commoditiesButton,
+                  self.statementsButton, self.todayMacroButton,
                   self.corrLabel, self.corrProgressBar, self.corrCommentLabel,
                   self.correlationMatrixButton):
             bottom_row1.addWidget(w)
@@ -732,8 +751,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         advice = None
         if getattr(self, '_fomc_new', 0):
             advice = ('Глава ФРС сделал заявление: есть непрочитанные заявления '
-                      'FOMC. Откройте «Макро» → вкладка FOMC Statement, чтобы '
-                      'прочитать.')
+                      'FOMC. Откройте «Statements», чтобы прочитать.')
         elif getattr(self, '_late_cycle', False):
             advice = self._LATE_CYCLE_GOAT_TEXT
         if not advice:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FOMC statement feed for the macro dashboard.
+"""FOMC statement feed (separate "Statements" dialog).
 
 Lists the post-meeting FOMC statements ("Federal Reserve issues FOMC
 statement") from the Fed's RSS feed (press_all.xml), with the full statement
@@ -16,10 +16,10 @@ import sqlite3
 
 import requests
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QTextBrowser, QVBoxLayout,
-                               QWidget)
+                               QListWidgetItem, QPushButton, QTextBrowser,
+                               QVBoxLayout, QWidget)
 
 _BG = '#1e1f24'
 _TXT = '#dcdce0'
@@ -27,14 +27,6 @@ _GRID = '#43464f'
 
 _FEED_URL = 'https://www.federalreserve.gov/feeds/press_all.xml'
 _REFRESH_HOURS = 24
-
-# Phrase that opens the statement body on the Fed press-release pages.
-_START_PATTERNS = [
-    'The Federal Open Market Committee approved the following',
-    'Recent indicators suggest that economic activity',
-    'Economic activity',
-    'Information received since the Federal Open Market Committee met',
-]
 
 _DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'macro_cache.db')
 
@@ -131,10 +123,16 @@ def mark_read(statement_id):
         conn.close()
 
 
+def _http_text(url):
+    """GET a page and decode as UTF-8 (the Fed serves utf-8 despite the header)."""
+    r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=25)
+    r.raise_for_status()
+    return r.content.decode('utf-8', errors='replace')
+
+
 def _fetch_feed_items():
     """Parse the Fed RSS feed and return (title, url) of FOMC statements."""
-    body = requests.get(_FEED_URL, headers={'User-Agent': 'Mozilla/5.0'},
-                        timeout=25).text
+    body = _http_text(_FEED_URL)
     body = body.lstrip('\ufeff')
     out = []
     for block in re.findall(r'<item>.*?</item>', body, re.S):
@@ -152,25 +150,71 @@ def _fetch_feed_items():
     return out
 
 
-def _fetch_statement_body(url):
-    """Return the statement text from a Fed press-release page."""
-    body = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'},
-                        timeout=25).text
-    end = body.find('Implementation Note')
-    seg = body[:end] if end > 0 else body
-    start = -1
-    for pat in _START_PATTERNS:
-        start = seg.find(pat)
-        if start >= 0:
-            break
-    seg = seg[start:] if start >= 0 else seg
-    txt = re.sub(r'<script.*?</script>', ' ', seg, flags=re.S)
-    txt = re.sub(r'<style.*?</style>', ' ', txt, flags=re.S)
-    txt = re.sub(r'<[^>]+>', ' ', txt)
+def _find_start_paragraph(paras):
+    """Index of the first <p> that opens the statement body, else 0.
+
+    Targets the stable modern FOMC template (since ~2019): the statement is
+    announced with "approved the following statement for release by a
+    N – M vote". Older/edge phrasing ("Information received since ...") is
+    matched too, so a format drift degrades gracefully instead of parsing junk.
+    """
+    for i, p in enumerate(paras):
+        plain = re.sub(r'<[^>]+>', '', p)
+        if 'for release by a' in plain or \
+                plain.strip().startswith('The Federal Open Market Committee approved') or \
+                plain.strip().startswith('Information received since'):
+            return i
+    return 0
+
+
+def _flat_fallback(seg):
+    """Flat text fallback: collapse the page, trimmed at statement markers."""
+    txt = re.sub(r'<[^>]+>', ' ', seg)
     txt = html_module.unescape(txt)
     txt = re.sub(r'\s+', ' ', txt).strip()
     txt = re.split(r'For media inquiries', txt)[0].strip()
-    return txt
+    for marker in ('The Federal Open Market Committee', 'Information received '
+                   'since', 'Economic activity', 'decided to maintain'):
+        i = txt.find(marker)
+        if i >= 0:
+            txt = txt[i:]
+            break
+    return '<p>{}</p>'.format(html_module.escape(txt))
+
+
+def _fetch_statement_body(url):
+    """Return the statement body as HTML (paragraphs preserved).
+
+    Keeping the original <p> blocks (and inline <strong>/<em>) avoids the
+    readability loss of a flat text blob; the QTextBrowser renders it with the
+    original paragraph structure.
+    """
+    body = _http_text(url)
+    end = body.find('Implementation Note')
+    seg = body[:end] if end > 0 else body
+    # Drop the header/scripts/meta so the anchor is found only in the body.
+    seg = re.sub(r'<head.*?</head>', '', seg, flags=re.S)
+    seg = re.sub(r'<script.*?</script>', '', seg, flags=re.S)
+    seg = re.sub(r'<style.*?</style>', '', seg, flags=re.S)
+    paras = re.findall(r'<p[^>]*>(.*?)</p>', seg, re.S)
+    out = []
+    for p in paras[_find_start_paragraph(paras):]:
+        inner = re.sub(r'<script.*?</script>', '', p, flags=re.S)
+        plain = html_module.unescape(
+            re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', inner))).strip()
+        if not plain:
+            continue
+        if 'For media inquiries' in plain:
+            continue
+        out.append(inner.strip())
+    if out:
+        # Trim the page chrome ("For release at ... EDT", "Share") from the
+        # intro paragraph, keeping the statement text.
+        m = re.search(r'The Federal Open Market Committee approved', out[0])
+        if m:
+            out[0] = out[0][m.start():]
+        return '<p>{}</p>'.format('</p><p>'.join(out))
+    return _flat_fallback(seg)
 
 
 def fetch_fomc_statements():
@@ -219,15 +263,17 @@ def refresh_fomc_if_stale(force=False):
 
 def _decision_summary(body):
     """Short summary of the rate decision, or '' when not found."""
+    text = re.sub(r'<[^>]+>', ' ', body or '')
+    text = html_module.unescape(re.sub(r'\s+', ' ', text))
     m = re.search(
         r'decided to maintain the target range for the federal funds rate '
-        r'at ([^.,;]+)', body, re.I)
+        r'at ([^.,;]+)', text, re.I)
     if m:
         return 'ставка сохранена: {}'.format(
             re.sub(r'\s+', ' ', m.group(1)).strip())
     m = re.search(
         r'decided to (lower|raise) the target range for the federal funds '
-        r'rate by ([^.,;]+)', body, re.I)
+        r'rate by ([^.,;]+)', text, re.I)
     if m:
         verb = 'понижена' if m.group(1) == 'lower' else 'повышена'
         return 'ставка {} на {}'.format(
@@ -310,12 +356,109 @@ class FomcTab(QWidget):
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         root = QVBoxLayout(dlg)
         root.setContentsMargins(12, 12, 12, 12)
-        head = QLabel('FOMC statement, {}'.format(it['date']))
+        summary = _decision_summary(it.get('body', ''))
+        head = QLabel('FOMC statement, {}{}'.format(
+            it['date'], ' — ' + summary if summary else ''))
+        head.setWordWrap(True)
         head.setStyleSheet('color: {}; font-weight: bold;'.format(_TXT))
         root.addWidget(head)
+        url = it.get('url') or ''
+        if url:
+            link = QLabel('<a href="{0}" style="color: #81a1c1;">Открыть '
+                          'оригинал на federalreserve.gov</a>'.format(url))
+            link.setOpenExternalLinks(True)
+            link.setStyleSheet('font-size: 11px;')
+            root.addWidget(link)
         view = QTextBrowser()
         view.setStyleSheet('QTextBrowser {{ background-color: {}; color: {}; }}'
                            .format(_BG, _TXT))
-        view.setPlainText(it.get('body') or '(текст заявления недоступен)')
+        body = it.get('body') or ''
+        if body.startswith('<'):
+            view.setHtml(body)
+        else:
+            view.setPlainText(body or '(текст заявления недоступен)')
         root.addWidget(view, 1)
         dlg.show()
+
+
+class _FomcLoaderThread(QThread):
+    """Refresh the FOMC feed off the UI thread, then emit load_done."""
+
+    load_done = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        try:
+            refresh_fomc_if_stale()
+        except Exception as e:  # noqa: BLE001 - a failing refresh must not kill the UI
+            print('FOMC refresh failed: {}'.format(e))
+        self.load_done.emit()
+
+
+class StatementsDialog(QDialog):
+    """FOMC statements feed as a standalone dialog (button "Statements")."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('FOMC Statements')
+        self.resize(780, 560)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+
+        head = QLabel('Заявления ФРС (FOMC) — источник: federalreserve.gov')
+        head.setStyleSheet('color: {}; font-weight: bold;'.format(_TXT))
+        root.addWidget(head)
+
+        self.tab = FomcTab(self)
+        root.addWidget(self.tab, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.reloadButton = QPushButton('Reload')
+        self.reloadButton.clicked.connect(self._load)
+        row.addWidget(self.reloadButton)
+        closeBtn = QPushButton('Close')
+        closeBtn.clicked.connect(self.accept)
+        row.addWidget(closeBtn)
+        root.addLayout(row)
+
+        self._loader = None
+        self._load()
+
+    def _load(self):
+        self.reloadButton.setEnabled(False)
+        self.tab.set_statements(load_fomc_statements())
+        self._loader = _FomcLoaderThread(self)
+        self._loader.load_done.connect(self._on_load_done)
+        self._loader.start()
+
+    def _on_load_done(self):
+        self.reloadButton.setEnabled(True)
+        self.tab.set_statements(load_fomc_statements())
+        if unread_count():
+            self._show_goat('Есть непрочитанные заявления ФРС (FOMC). '
+                            'Нажмите на строку, чтобы прочитать.')
+
+    def _show_goat(self, advice):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+            self._goat = None
+        if not advice:
+            return
+        self._goat = GoatAssistant('', self, advice=advice,
+                                   auto_hide_ms=20000)
+        self._goat.show()
+
+    def closeEvent(self, event):
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.wait(5000)
+        super().closeEvent(event)
