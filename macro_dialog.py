@@ -1225,6 +1225,55 @@ class _IndicatorTab(QWidget):
                 'Решающие для S&P 500 и NASDAQ факторы сейчас — ставки и '
                 'прибыли.')
 
+    def sentiment_advice(self):
+        """Goat text for the Michigan Consumer Sentiment tab, or ''.
+
+        Reference lines on the chart: 80 (strong), 70 (neutral),
+        55 (recession zone). Read the level plus 90-day momentum, framed
+        for S&P 500 / NASDAQ.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        if v != v:  # NaN
+            return ''
+        mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        d = (v - mo) if mo is not None and mo == mo else None
+
+        if v >= 80.0:
+            if d is not None and d < -5.0:
+                return ('Уверенность в зоне оптимизма, но разворачивается '
+                        'вниз — потребитель начнёт тормозить траты: S&P 500 '
+                        'лишается поддержки расходов, NASDAQ держится на '
+                        'ставках.')
+            return ('Уверенность выше 80 — уверенные траты, экономика в '
+                    'экспансии: поддержка для S&P 500 и NASDAQ (risk-on).')
+        if v >= 70.0:
+            if d is not None and d < -5.0:
+                return ('Уверенность в средней зоне и падает — потребитель '
+                        'начинает экономить: циклические сектора S&P 500 '
+                        'слабеют первыми, NASDAQ устоит, пока ставки не '
+                        'выросли.')
+            return ('Уверенность в средней зоне (70–80) — потребитель '
+                    'спокоен, без эйфории: нейтрально-позитивно для S&P 500 '
+                    'и NASDAQ.')
+        if v >= 55.0:
+            if d is not None and d > 5.0:
+                return ('Уверенность у нижней границы и разворачивается '
+                        'вверх — потребитель оживает, дно пессимизма '
+                        'пройдено: плюс для S&P 500 в горизонте 3–6 мес.')
+            return ('Уверенность ниже 70 — потребитель насторожен: экономика '
+                    'замедляется, S&P 500 под давлением; NASDAQ держится, '
+                    'пока ставки не растут.')
+        if d is not None and d > 5.0:
+            return ('Уверенность в зоне рецессии, но резко разворачивается '
+                    'вверх — рынок закладывает дно: отскок S&P 500 обычно '
+                    'опережает восстановление уверенности на 1–2 квартала.')
+        return ('Уверенность ниже 55 — зона рецессии: потребитель зажимает '
+                'траты, прибыли компаний под давлением. S&P 500 в горизонте '
+                '6–12 мес. рискует следовать за настроениями; NASDAQ отскочит '
+                'первым при снижении ставок ФРС.')
+
     # ------------------------------------------------------------------ aside
     def _sync_scrollbar(self):
         if self._data_x0 is None:
@@ -1504,6 +1553,9 @@ class MacroDialog(QDialog):
                                 self)
             if series_id == 'PERMIT':
                 self._permits_tab = tab
+            elif series_id == 'UMCSENT':
+                tab._hlines = [55, 70, 80]
+                self._sentiment_tab = tab
             ordered.append((title, tab))
             self._widgets.append(tab)
 
@@ -1719,6 +1771,8 @@ class MacroDialog(QDialog):
             advice = widget.permits_advice()
         elif widget is self._nfib_tab:
             advice = widget.nfib_advice()
+        elif widget is self._sentiment_tab:
+            advice = widget.sentiment_advice()
         self._show_goat(advice)
 
     def closeEvent(self, event):
