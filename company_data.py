@@ -49,6 +49,14 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN trailing_pe REAL")
     if cols and 'trailing_eps_growth' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN trailing_eps_growth REAL")
+    if cols and 'surprise_avg' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN surprise_avg REAL")
+    if cols and 'surprise_last' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN surprise_last REAL")
+    if cols and 'surprise_n' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN surprise_n INT")
+    if cols and 'earnings_date' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN earnings_date TEXT")
     return conn
 
 
@@ -91,6 +99,10 @@ def fetch_company_metrics(ticker):
         fc = _stockanalysis_forecast(ticker)
     except Exception:  # noqa: BLE001 - optional fields must not break
         fc = None
+    try:
+        eh = _yahoo_earnings_history(ticker)
+    except Exception:  # noqa: BLE001 - optional fields must not break
+        eh = None
     yh = _yahoo_returns(ticker)
     if not sa or not yh:
         return None
@@ -106,7 +118,13 @@ def fetch_company_metrics(ticker):
             'trailing_eps_growth': sa.get('trailing_eps_growth'),
             'revenue_growth': sa['revenue_growth'],
             'roic': (st or {}).get('roic'),
-            'debt_equity': (st or {}).get('debt_equity')}
+            'debt_equity': (st or {}).get('debt_equity'),
+            'earnings_date': (st or {}).get('earnings_date'),
+            'surprise_avg': (eh or {}).get('surprise_avg'),
+            'surprise_last': (eh or {}).get('surprise_last'),
+            'surprise_n': (eh or {}).get('surprise_n'),
+            'sector': sa.get('sector'),
+            'company_name': sa.get('company_name')}
 
 
 def _stockanalysis_metrics(ticker):
@@ -175,10 +193,13 @@ def _stockanalysis_metrics(ticker):
                 revenue_growth = rg
         except ValueError:
             revenue_growth = None
+    sector = _grab(r'\{t:"Sector",v:"([^"]+)"', html)
+    company_name = _grab(r'nameFull:"([^"]+)"', html)
     return {'net_margin': margin, 'net_margin_yoy': yoy,
             'forward_pe': forward_pe, 'trailing_pe': trailing_pe,
             'trailing_eps_growth': trailing_eps_growth,
-            'revenue_growth': revenue_growth}
+            'revenue_growth': revenue_growth, 'sector': sector,
+            'company_name': company_name}
 
 
 def _stockanalysis_forecast(ticker):
@@ -215,7 +236,7 @@ def _stat_value(html, stat_id):
 
 
 def _stockanalysis_statistics(ticker):
-    """ROIC (%, TTM) и Debt/Equity из SSR-блока statistics-страницы."""
+    """ROIC (%, TTM), Debt/Equity и дата ближайшего отчёта из statistics-страницы."""
     r = requests.get('https://stockanalysis.com/stocks/{}/statistics/'.format(
         ticker.lower()), headers=_UA, timeout=25)
     r.raise_for_status()
@@ -226,7 +247,16 @@ def _stockanalysis_statistics(ticker):
     debt_equity = _stat_value(html, 'debtEquity')
     if debt_equity is not None and not (debt_equity >= 0.0):
         debt_equity = None
-    return {'roic': roic, 'debt_equity': debt_equity}
+    earnings_date = None
+    ed = re.search(r'id:"earningsdate"[^}]*?value:"([^"]+)"', html)
+    if ed:
+        try:
+            earnings_date = datetime.datetime.strptime(
+                ed.group(1), '%b %d, %Y').date().isoformat()
+        except ValueError:
+            earnings_date = None
+    return {'roic': roic, 'debt_equity': debt_equity,
+            'earnings_date': earnings_date}
 
 
 def _yahoo_returns(ticker):
@@ -265,6 +295,62 @@ def _yahoo_returns(ticker):
     return None
 
 
+_YAHOO_SESSION = None
+_YAHOO_CRUMB = None
+
+
+def _yahoo_session():
+    """Session Yahoo с cookie и crumb для quoteSummary (lazy, кэш на процесс)."""
+    global _YAHOO_SESSION, _YAHOO_CRUMB
+    if _YAHOO_SESSION is None:
+        s = requests.Session()
+        s.headers.update(_UA)
+        try:
+            s.get('https://fc.yahoo.com', timeout=10)
+            cr = s.get('https://query1.finance.yahoo.com/v1/test/getcrumb',
+                       timeout=10)
+            _YAHOO_CRUMB = cr.text.strip() if cr.status_code == 200 else None
+        except Exception:  # noqa: BLE001
+            _YAHOO_CRUMB = None
+        _YAHOO_SESSION = s
+    return _YAHOO_SESSION, _YAHOO_CRUMB
+
+
+def _yahoo_earnings_history(ticker):
+    """Сюрпризы «факт vs прогноз» за последние 4 квартала (Yahoo earningsHistory).
+
+    Возвращает {'surprise_avg', 'surprise_last', 'surprise_n'} или None.
+    """
+    try:
+        session, crumb = _yahoo_session()
+        if not crumb:
+            return None
+        url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
+               '?modules=earningsHistory&crumb={}').format(ticker, crumb)
+        r = session.get(url, timeout=20)
+        r.raise_for_status()
+        result = (r.json().get('quoteSummary') or {}).get('result')
+        if not result:
+            return None
+        history = (result[0].get('earningsHistory') or {}).get('history') or []
+        surprises = []
+        for h in history:
+            sp = (h.get('surprisePercent') or {}).get('raw')
+            if sp is not None:
+                try:
+                    surprises.append(float(sp))
+                except (TypeError, ValueError):
+                    pass
+        if len(surprises) < 2:
+            return None
+        recent = surprises[-4:]
+        return {'surprise_avg': sum(recent) / len(recent),
+                'surprise_last': recent[-1],
+                'surprise_n': len(recent)}
+    except Exception:  # noqa: BLE001 - best-effort
+        return None
+
+
 # ------------------------------------------------------------------ cache
 def _metrics_cached(ticker):
     conn = _conn()
@@ -272,14 +358,15 @@ def _metrics_cached(ticker):
         row = conn.execute(
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
             "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
-            "trailing_pe, trailing_eps_growth, fetched_at "
+            "trailing_pe, trailing_eps_growth, surprise_avg, surprise_last, "
+            "surprise_n, earnings_date, fetched_at "
             "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[11])
+        fetched = datetime.datetime.fromisoformat(row[15])
     except ValueError:
         return None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
@@ -287,7 +374,9 @@ def _metrics_cached(ticker):
             'forward_pe': row[4], 'eps_growth': row[5],
             'revenue_growth': row[6], 'roic': row[7],
             'debt_equity': row[8], 'trailing_pe': row[9],
-            'trailing_eps_growth': row[10], 'fetched_at': fetched}
+            'trailing_eps_growth': row[10], 'surprise_avg': row[11],
+            'surprise_last': row[12], 'surprise_n': row[13],
+            'earnings_date': row[14], 'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
@@ -297,14 +386,17 @@ def _save_metrics(ticker, sector, metrics):
             "INSERT OR REPLACE INTO company_metrics "
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
             "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
-            "debt_equity, trailing_pe, trailing_eps_growth, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "debt_equity, trailing_pe, trailing_eps_growth, surprise_avg, "
+            "surprise_last, surprise_n, earnings_date, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
              metrics.get('revenue_growth'), metrics.get('roic'),
              metrics.get('debt_equity'), metrics.get('trailing_pe'),
              metrics.get('trailing_eps_growth'),
+             metrics.get('surprise_avg'), metrics.get('surprise_last'),
+             metrics.get('surprise_n'), metrics.get('earnings_date'),
              datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
@@ -345,6 +437,10 @@ def _apply_metrics(c, m):
         c['revenueGrowthPct'] = m.get('revenue_growth')
         c['roicPct'] = m.get('roic')
         c['debtEquity'] = m.get('debt_equity')
+        c['surpriseAvg'] = m.get('surprise_avg')
+        c['surpriseLast'] = m.get('surprise_last')
+        c['surpriseN'] = m.get('surprise_n')
+        c['earningsDate'] = m.get('earnings_date')
     return c
 
 

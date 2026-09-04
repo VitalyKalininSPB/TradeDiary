@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import company_data
+import company_fixture
+import company_quant
 import sector_quant
 
 _TXT = '#dcdce0'
@@ -68,6 +71,72 @@ class _SectorQuantThread(QtCore.QThread):
             self.failed.emit(str(e))
 
 
+class _TickerAnalyzeThread(QtCore.QThread):
+    """Фоновый анализ отдельного тикера: сектор, метрики, ranked-строка."""
+
+    analyzed = QtCore.Signal(str, object, object)   # ticker, sector, row
+    failed = QtCore.Signal(str, str)                # ticker, error
+
+    def __init__(self, ticker, parent=None):
+        super().__init__(parent)
+        self._ticker = ticker
+
+    def run(self):
+        try:
+            row, sector = self._build_ticker_row(self._ticker)
+            if row is None:
+                self.failed.emit(self._ticker,
+                                 'Нет данных по тикеру (проверьте тикер).')
+                return
+            self.analyzed.emit(self._ticker, sector or '', row)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(self._ticker, str(e))
+
+    @staticmethod
+    def _build_ticker_row(ticker):
+        metrics = company_data.fetch_company_metrics(ticker)
+        if not metrics:
+            return None, None
+        sector = metrics.get('sector') or ''
+        row = {
+            'ticker': ticker,
+            'company': metrics.get('company_name') or ticker,
+            'sector': sector,
+            'forward_pe': metrics.get('forward_pe'),
+            'trailing_pe': metrics.get('trailing_pe'),
+            'eps_growth': metrics.get('eps_growth'),
+            'trailing_eps_growth': metrics.get('trailing_eps_growth'),
+            'revenue_growth': metrics.get('revenue_growth'),
+            'net_margin_yoy': metrics.get('net_margin_yoy'),
+            'surprise_avg': metrics.get('surprise_avg'),
+            'surprise_last': metrics.get('surprise_last'),
+            'surprise_n': metrics.get('surprise_n'),
+            'earnings_date': metrics.get('earnings_date'),
+            'sector_median_pe': None, 'sector_median_trailing_pe': None,
+            'sector_median_eps_growth': None,
+            'sector_median_trailing_eps_growth': None, 'pct_pe': None,
+        }
+        fp = metrics.get('forward_pe')
+        feg = metrics.get('eps_growth')
+        row['peg'] = (fp / feg) if (fp is not None and feg and feg > 0) else None
+        if sector in company_fixture._FIXTURE:
+            inputs = company_data.sector_companies_cached(sector)
+            res = company_quant.rank_companies(inputs)
+            scored = [r for r in res if r.get('_rankable')]
+            ref = scored[0] if scored else {}
+            row['sector_median_pe'] = ref.get('sector_median_pe')
+            row['sector_median_trailing_pe'] = ref.get(
+                'sector_median_trailing_pe')
+            row['sector_median_eps_growth'] = ref.get('sector_median_eps_growth')
+            row['sector_median_trailing_eps_growth'] = ref.get(
+                'sector_median_trailing_eps_growth')
+            pes = [r.get('forward_pe') for r in scored
+                   if r.get('forward_pe') is not None]
+            row['pct_pe'] = (company_quant._percentile(fp, pes)
+                             if fp is not None else None)
+        return row, sector
+
+
 class SectorQuantDialog(QtWidgets.QDialog):
     """Sector Quantitative Assessment: 5-column summary (Rank, Sector, Signal,
     Score, Next step) + a detail panel opened by clicking a sector."""
@@ -82,6 +151,19 @@ class SectorQuantDialog(QtWidgets.QDialog):
         self.infoLabel = QtWidgets.QLabel('Загрузка…')
         self.infoLabel.setStyleSheet('color: {};'.format(_TXT))
         root.addWidget(self.infoLabel)
+
+        trow = QtWidgets.QHBoxLayout()
+        tlabel = QtWidgets.QLabel('Ticker:')
+        tlabel.setStyleSheet('color: {};'.format(_TXT))
+        self.tickerEdit = QtWidgets.QLineEdit()
+        self.tickerEdit.setPlaceholderText('Например: AMD, PFE, MU…')
+        self.tickerButton = QtWidgets.QPushButton('Анализ')
+        trow.addWidget(tlabel)
+        trow.addWidget(self.tickerEdit, 1)
+        trow.addWidget(self.tickerButton)
+        root.addLayout(trow)
+        self.tickerButton.clicked.connect(self._analyze_ticker)
+        self.tickerEdit.returnPressed.connect(self._analyze_ticker)
 
         self.table = QtWidgets.QTableWidget(0, len(_HEADERS))
         self.table.setHorizontalHeaderLabels(_HEADERS)
@@ -119,6 +201,7 @@ class SectorQuantDialog(QtWidgets.QDialog):
         self.closeButton.clicked.connect(self.close)
 
         self._thread = None
+        self._ticker_thread = None
         self._payload = None
         self._current_sector = None
         self._load_cached()
@@ -238,6 +321,37 @@ class SectorQuantDialog(QtWidgets.QDialog):
         ]
         self.detail.setPlainText('\n'.join(lines))
 
+    def _analyze_ticker(self):
+        ticker = self.tickerEdit.text().strip().upper()
+        if not ticker:
+            return
+        if self._ticker_thread is not None and self._ticker_thread.isRunning():
+            return
+        self.tickerButton.setEnabled(False)
+        self.infoLabel.setText('Анализ тикера {}…'.format(ticker))
+        self._ticker_thread = _TickerAnalyzeThread(ticker, self)
+        self._ticker_thread.analyzed.connect(self._on_ticker_analyzed)
+        self._ticker_thread.failed.connect(self._on_ticker_failed)
+        self._ticker_thread.start()
+
+    def _on_ticker_analyzed(self, ticker, sector, row):
+        self.tickerButton.setEnabled(True)
+        self.infoLabel.setText(
+            'Тикер {} · сектор: {}'.format(ticker, sector or 'вне базы'))
+        from recommendation_panel import RecommendationDialog
+        dlg = RecommendationDialog(row, self.window())
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        main = self.window()
+        if hasattr(main, '_dialogs_set'):
+            main._dialogs_set().add(dlg)
+            dlg.destroyed.connect(lambda obj=None, d=dlg:
+                                  main._dialogs_set().discard(d))
+        dlg.show()
+
+    def _on_ticker_failed(self, ticker, error):
+        self.tickerButton.setEnabled(True)
+        self.infoLabel.setText('Тикер {}: {}'.format(ticker, error))
+
     def _view_companies(self):
         if not self._current_sector:
             return
@@ -267,6 +381,8 @@ class SectorQuantDialog(QtWidgets.QDialog):
     def closeEvent(self, event):
         if self._thread is not None and self._thread.isRunning():
             self._thread.wait(5000)
+        if self._ticker_thread is not None and self._ticker_thread.isRunning():
+            self._ticker_thread.wait(5000)
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()

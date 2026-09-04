@@ -10,6 +10,8 @@ RU-строки и данные для 4-столбцовых графиков (
   sector_median_trailing_pe, sector_median_trailing_eps_growth.
 """
 
+import turnaround
+
 # Порог для направления ожиданий: разрыв trailing↔forward P/E в ±3%.
 _REV_THRESHOLD = 0.03
 
@@ -119,4 +121,5 @@ def build_recommendation(e):
 
     return {'rel': rel, 'above': above, 'revision': revision, 'status': status,
             'summary_lines': summary, 'expanded_lines': mech,
-            'pe_bars': pe_bars, 'epsg_bars': epsg_bars}
+            'pe_bars': pe_bars, 'epsg_bars': epsg_bars,
+            'dynamics': turnaround.classify_dynamics(e)}

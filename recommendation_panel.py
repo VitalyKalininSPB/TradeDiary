@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 import recommendation
 
@@ -47,6 +48,12 @@ class RecommendationPanel(QtWidgets.QWidget):
             'QPushButton:hover { color: #ffffff; }')
         self._header.setCursor(Qt.CursorShape.PointingHandCursor)
         root.addWidget(self._header)
+
+        self._verdict = QtWidgets.QLabel('')
+        self._verdict.setWordWrap(True)
+        self._verdict.setStyleSheet('color: {}; font-weight: bold;'
+                                    ' font-size: 12px;'.format(_TXT))
+        root.addWidget(self._verdict)
 
         self._summary = QtWidgets.QLabel('Выберите компанию.')
         self._summary.setWordWrap(True)
@@ -94,6 +101,7 @@ class RecommendationPanel(QtWidgets.QWidget):
         self._e = e
         if e is None:
             self._title = 'Рекомендация'
+            self._verdict.setText('')
             self._summary.setText('Выберите компанию.')
             self._mech.setText('')
             self._draw_bars(self._ax_pe, 'P/E (×)', [],
@@ -106,7 +114,12 @@ class RecommendationPanel(QtWidgets.QWidget):
         ticker = e.get('ticker') or ''
         self._title = 'Рекомендация' + (' — ' + ticker if ticker else '')
         rec = recommendation.build_recommendation(e)
-        self._summary.setText('\n'.join(rec['summary_lines']))
+        dyn = rec['dynamics']
+        self._verdict.setText(dyn['verdict'])
+        self._verdict.setStyleSheet('color: {}; font-weight: bold;'
+                                    ' font-size: 12px;'.format(dyn['color']))
+        self._summary.setTextFormat(Qt.TextFormat.RichText)
+        self._summary.setText(self._summary_html(rec['summary_lines']))
         self._mech.setText('\n'.join(rec['expanded_lines']))
         self._draw_bars(self._ax_pe, 'P/E (×)', rec['pe_bars'],
                         lambda v: '{:.1f}'.format(v))
@@ -114,6 +127,14 @@ class RecommendationPanel(QtWidgets.QWidget):
                         lambda v: '{:+.1f}%'.format(v))
         self._refresh_canvas()
         self._update_header()
+
+    @staticmethod
+    def _summary_html(lines):
+        def esc(s):
+            return s.replace('&', '&amp;').replace('<', '&lt;')
+        return '<br>'.join(
+            '<span style="color:{0}">{1}</span>'.format(_TXT, esc(line))
+            for line in lines)
 
     def _refresh_canvas(self):
         try:
@@ -164,6 +185,15 @@ class RecommendationDialog(QtWidgets.QDialog):
         rec = recommendation.build_recommendation(e)
         self._build_rec_header(root, rec, e)
 
+        sector_known = any(label.startswith('Сектор') and v is not None
+                           for label, v in rec['pe_bars'])
+        if not sector_known:
+            note = QtWidgets.QLabel(
+                'Сектор вне базы — сравнение с похожими компаниями недоступно.')
+            note.setWordWrap(True)
+            note.setStyleSheet('color: {}; font-size: 11px;'.format(_MUTED))
+            root.insertWidget(1, note)
+
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_tab(
             rec['pe_bars'], 'P/E (×)', lambda v: '{:.1f}'.format(v),
@@ -172,6 +202,8 @@ class RecommendationDialog(QtWidgets.QDialog):
             rec['epsg_bars'], 'EPS growth (%)',
             lambda v: '{:+.1f}%'.format(v), self._epsg_explanation(e, rec)),
             'EPS growth')
+        self.tabs.addTab(self._build_dynamics_tab(rec['dynamics']),
+                         'Динамика')
         root.addWidget(self.tabs, 1)
 
         row = QtWidgets.QHBoxLayout()
@@ -229,6 +261,63 @@ class RecommendationDialog(QtWidgets.QDialog):
         lay.addWidget(exp)
         canvas = FigureCanvas(_bars_figure(bars, title, fmt))
         lay.addWidget(canvas, 1)
+        return tab
+
+    def _build_dynamics_tab(self, dyn):
+        """Turnaround vs Value Trap: таблица показателей + вердикт + риск."""
+        tab = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(tab)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        verdict = QtWidgets.QLabel(dyn['verdict'])
+        verdict.setStyleSheet('color: {}; font-size: 14px; '
+                              'font-weight: bold;'.format(dyn['color']))
+        lay.addWidget(verdict)
+
+        if dyn.get('rev_note'):
+            note = QtWidgets.QLabel(dyn['rev_note'])
+            note.setWordWrap(True)
+            note.setStyleSheet('color: {}; font-size: 11px;'.format(_MUTED))
+            lay.addWidget(note)
+
+        table = QtWidgets.QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(
+            ['Показатель', 'Значение', 'Что это значит'])
+        table.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setRowCount(len(dyn['rows']))
+        for r, (name, value, meaning) in enumerate(dyn['rows']):
+            for c, v in enumerate((name, value, meaning)):
+                item = QtWidgets.QTableWidgetItem(str(v))
+                item.setForeground(QColor(_TXT))
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        table.setFixedHeight(36 + 28 * len(dyn['rows']))
+        lay.addWidget(table)
+
+        if dyn['earnings_days'] is not None:
+            if dyn['earnings_days'] >= 0:
+                rep = 'Следующая проверка: квартальный отчёт через {} дней.'.format(
+                    dyn['earnings_days'])
+            else:
+                rep = 'Ближайший отчёт был {} дней назад.'.format(
+                    -dyn['earnings_days'])
+            lbl = QtWidgets.QLabel(rep)
+            lbl.setStyleSheet('color: {}; font-size: 12px;'.format(_TXT))
+            lay.addWidget(lbl)
+
+        risk = QtWidgets.QLabel(dyn['risk'])
+        risk.setWordWrap(True)
+        risk.setStyleSheet('color: {}; font-size: 12px;'.format(_MUTED))
+        lay.addWidget(risk)
+        confirm = QtWidgets.QLabel(dyn['confirm'])
+        confirm.setWordWrap(True)
+        confirm.setStyleSheet('color: {}; font-size: 12px;'.format(_MUTED))
+        lay.addWidget(confirm)
+        lay.addStretch(1)
         return tab
 
     @staticmethod
