@@ -15,6 +15,20 @@ import turnaround
 # Порог для направления ожиданий: разрыв trailing↔forward P/E в ±3%.
 _REV_THRESHOLD = 0.03
 
+_SHORT_LOW = 5.0      # < 5% float — низкий
+_SHORT_HIGH = 15.0    # > 15% float — высокий
+
+
+def _short_status(short_float):
+    """Простой статус Short Interest по % float."""
+    if short_float is None:
+        return 'нет данных', '#9aa0aa'
+    if short_float < _SHORT_LOW:
+        return 'низкий', '#81c784'
+    if short_float <= _SHORT_HIGH:
+        return 'заметный', '#f0c14b'
+    return 'высокий', '#ef5350'
+
 
 def _fmt_pct(v):
     if v is None:
@@ -119,7 +133,19 @@ def build_recommendation(e):
     epsg_bars = [('Сектор сейчас', steg), ('Компания сейчас', tepsg),
                  ('Сектор форвардный', sfeg), ('Компания форвардная', feg)]
 
+    short_float = e.get('short_float')
+    short_status, short_color = _short_status(short_float)
+    short = {
+        'float_pct': short_float,
+        'change_pct': e.get('short_change'),
+        'ratio': e.get('short_ratio'),
+        'date': e.get('short_date'),
+        'status': short_status,
+        'color': short_color,
+    }
+
     return {'rel': rel, 'above': above, 'revision': revision, 'status': status,
             'summary_lines': summary, 'expanded_lines': mech,
             'pe_bars': pe_bars, 'epsg_bars': epsg_bars,
+            'short': short,
             'dynamics': turnaround.classify_dynamics(e)}

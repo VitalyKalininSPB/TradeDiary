@@ -119,7 +119,9 @@ class RecommendationPanel(QtWidgets.QWidget):
         self._verdict.setStyleSheet('color: {}; font-weight: bold;'
                                     ' font-size: 12px;'.format(dyn['color']))
         self._summary.setTextFormat(Qt.TextFormat.RichText)
-        self._summary.setText(self._summary_html(rec['summary_lines']))
+        html = self._summary_html(rec['summary_lines'])
+        html += self._short_html(rec['short'])
+        self._summary.setText(html)
         self._mech.setText('\n'.join(rec['expanded_lines']))
         self._draw_bars(self._ax_pe, 'P/E (×)', rec['pe_bars'],
                         lambda v: '{:.1f}'.format(v))
@@ -135,6 +137,21 @@ class RecommendationPanel(QtWidgets.QWidget):
         return '<br>'.join(
             '<span style="color:{0}">{1}</span>'.format(_TXT, esc(line))
             for line in lines)
+
+    @staticmethod
+    def _short_html(short):
+        if short.get('float_pct') is None:
+            return ''
+        parts = ['{:.1f}% float'.format(short['float_pct'])]
+        if short.get('change_pct') is not None:
+            parts.append('изм. {:+.1f}%'.format(short['change_pct']))
+        if short.get('ratio') is not None:
+            parts.append('{:.1f} дн. на покрытие'.format(short['ratio']))
+        if short.get('date'):
+            parts.append('данные на {}'.format(short['date']))
+        return ('<br><span style="color:{0}">Short interest: '
+                '<b>{1}</b> · {2}</span>').format(
+                    short['color'], short['status'], ' · '.join(parts))
 
     def _refresh_canvas(self):
         try:
@@ -202,7 +219,7 @@ class RecommendationDialog(QtWidgets.QDialog):
             rec['epsg_bars'], 'EPS growth (%)',
             lambda v: '{:+.1f}%'.format(v), self._epsg_explanation(e, rec)),
             'EPS growth')
-        self.tabs.addTab(self._build_dynamics_tab(rec['dynamics']),
+        self.tabs.addTab(self._build_dynamics_tab(rec['dynamics'], rec['short']),
                          'Динамика')
         root.addWidget(self.tabs, 1)
 
@@ -263,7 +280,7 @@ class RecommendationDialog(QtWidgets.QDialog):
         lay.addWidget(canvas, 1)
         return tab
 
-    def _build_dynamics_tab(self, dyn):
+    def _build_dynamics_tab(self, dyn, short):
         """Turnaround vs Value Trap: таблица показателей + вердикт + риск."""
         tab = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(tab)
@@ -317,6 +334,36 @@ class RecommendationDialog(QtWidgets.QDialog):
         confirm.setWordWrap(True)
         confirm.setStyleSheet('color: {}; font-size: 12px;'.format(_MUTED))
         lay.addWidget(confirm)
+
+        if short.get('float_pct') is not None:
+            sep = QtWidgets.QFrame()
+            sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+            sep.setStyleSheet('color: {};'.format(_GRID))
+            lay.addWidget(sep)
+            parts = ['{:.1f}% float'.format(short['float_pct'])]
+            if short.get('change_pct') is not None:
+                parts.append('изменение {:+.1f}%'.format(short['change_pct']))
+            if short.get('ratio') is not None:
+                parts.append('{:.1f} дн. на покрытие'.format(short['ratio']))
+            if short.get('date'):
+                parts.append('данные на {}'.format(short['date']))
+            box = QtWidgets.QFrame()
+            box.setStyleSheet('QFrame { background: #16171b; border: 1px solid '
+                              + _GRID + '; border-radius: 6px; }')
+            blay = QtWidgets.QVBoxLayout(box)
+            blay.setContentsMargins(10, 8, 10, 8)
+            t = QtWidgets.QLabel('Short interest')
+            t.setStyleSheet('color: {}; font-weight: bold; '
+                            'font-size: 12px;'.format(_TXT))
+            blay.addWidget(t)
+            v = QtWidgets.QLabel('{} · {}'.format(short['status'],
+                                                  ' · '.join(parts)))
+            v.setWordWrap(True)
+            v.setStyleSheet('color: {}; font-size: 12px;'.format(
+                short['color']))
+            blay.addWidget(v)
+            lay.addWidget(box)
+
         lay.addStretch(1)
         return tab
 
@@ -331,6 +378,12 @@ class RecommendationDialog(QtWidgets.QDialog):
         if tp is not None:
             lines.append('P/E сейчас (trailing): {:.1f}× — цена / прибыль '
                          'за последние 12 месяцев.'.format(tp))
+        if tp is None and e.get('net_margin') is not None \
+                and e.get('net_margin') < 0:
+            lines.append('«Компания сейчас» отсутствует: за последние 12 '
+                         'месяцев убыток (net margin {:+.1f}%), поэтому '
+                         'trailing P/E не вычисляется.'.format(
+                             e['net_margin']))
         if stp is not None:
             lines.append('Сектор сейчас (медиана): {:.1f}×.'.format(stp))
         if fp is not None:
@@ -363,6 +416,11 @@ class RecommendationDialog(QtWidgets.QDialog):
         if tepsg is not None:
             lines.append('Рост прибыли текущий (YoY): {:+.1f}% — фактический '
                          'за 12 месяцев.'.format(tepsg))
+        if tepsg is None and e.get('net_margin') is not None \
+                and e.get('net_margin') < 0:
+            lines.append('Trailing EPS growth отсутствует: фактическая '
+                         'прибыль за 12 месяцев отрицательная ({:+.1f}% '
+                         'net margin).'.format(e['net_margin']))
         if steg is not None:
             lines.append('Сектор текущий (медиана): {:+.1f}%.'.format(steg))
         if feg is not None:

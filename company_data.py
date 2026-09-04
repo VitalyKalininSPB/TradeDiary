@@ -57,6 +57,14 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN surprise_n INT")
     if cols and 'earnings_date' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN earnings_date TEXT")
+    if cols and 'short_float' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN short_float REAL")
+    if cols and 'short_change' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN short_change REAL")
+    if cols and 'short_ratio' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN short_ratio REAL")
+    if cols and 'short_date' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN short_date TEXT")
     return conn
 
 
@@ -103,6 +111,10 @@ def fetch_company_metrics(ticker):
         eh = _yahoo_earnings_history(ticker)
     except Exception:  # noqa: BLE001 - optional fields must not break
         eh = None
+    try:
+        sd = _yahoo_short_interest(ticker)
+    except Exception:  # noqa: BLE001 - optional fields must not break
+        sd = None
     yh = _yahoo_returns(ticker)
     if not sa or not yh:
         return None
@@ -124,7 +136,11 @@ def fetch_company_metrics(ticker):
             'surprise_last': (eh or {}).get('surprise_last'),
             'surprise_n': (eh or {}).get('surprise_n'),
             'sector': sa.get('sector'),
-            'company_name': sa.get('company_name')}
+            'company_name': sa.get('company_name'),
+            'short_float': (st or {}).get('short_float'),
+            'short_change': (st or {}).get('short_change'),
+            'short_ratio': (st or {}).get('short_ratio'),
+            'short_date': (sd or {}).get('short_date')}
 
 
 def _stockanalysis_metrics(ticker):
@@ -236,7 +252,7 @@ def _stat_value(html, stat_id):
 
 
 def _stockanalysis_statistics(ticker):
-    """ROIC (%, TTM), Debt/Equity и дата ближайшего отчёта из statistics-страницы."""
+    """ROIC (%, TTM), Debt/Equity, дата отчёта и Short Interest из statistics."""
     r = requests.get('https://stockanalysis.com/stocks/{}/statistics/'.format(
         ticker.lower()), headers=_UA, timeout=25)
     r.raise_for_status()
@@ -255,8 +271,49 @@ def _stockanalysis_statistics(ticker):
                 ed.group(1), '%b %d, %Y').date().isoformat()
         except ValueError:
             earnings_date = None
+    short_float = short_ratio = short_change = None
+    sm = re.search(r'shortSelling:\{text:"[^"]*",data:\[(.*?)\]', html,
+                   re.DOTALL)
+    if sm:
+        blk = sm.group(1)
+        short_float = _stat_value(blk, 'shortFloat')
+        short_ratio = _stat_value(blk, 'shortRatio')
+        cur = _parse_abbrev(_grab(
+            r'\{id:"shortInterest",title:"[^"]*",value:"([^"]+)"', blk))
+        prev = _parse_abbrev(_grab(
+            r'\{id:"shortPriorMonth",title:"[^"]*",value:"([^"]+)"', blk))
+        if cur is not None and prev is not None and prev > 0:
+            short_change = (cur - prev) / prev * 100.0
     return {'roic': roic, 'debt_equity': debt_equity,
-            'earnings_date': earnings_date}
+            'earnings_date': earnings_date,
+            'short_float': short_float, 'short_ratio': short_ratio,
+            'short_change': short_change}
+
+
+def _yahoo_short_interest(ticker):
+    """Дата последнего среза Short Interest из Yahoo defaultKeyStatistics.
+
+    Best-effort: если Yahoo недоступен (crumb/троттлинг) — None.
+    """
+    try:
+        session, crumb = _yahoo_session()
+        if not crumb:
+            return None
+        url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
+               '?modules=defaultKeyStatistics&crumb={}').format(ticker, crumb)
+        r = session.get(url, timeout=20)
+        r.raise_for_status()
+        result = (r.json().get('quoteSummary') or {}).get('result')
+        if not result:
+            return None
+        ks = result[0].get('defaultKeyStatistics') or {}
+        short_date = (ks.get('shortDate') or {}).get('raw')
+        if not short_date:
+            return None
+        return {'short_date': datetime.date.fromtimestamp(
+            short_date).isoformat()}
+    except Exception:  # noqa: BLE001 - best-effort
+        return None
 
 
 def _yahoo_returns(ticker):
@@ -359,14 +416,15 @@ def _metrics_cached(ticker):
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
             "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
             "trailing_pe, trailing_eps_growth, surprise_avg, surprise_last, "
-            "surprise_n, earnings_date, fetched_at "
+            "surprise_n, earnings_date, short_float, short_change, "
+            "short_ratio, short_date, fetched_at "
             "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[15])
+        fetched = datetime.datetime.fromisoformat(row[19])
     except ValueError:
         return None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
@@ -376,7 +434,9 @@ def _metrics_cached(ticker):
             'debt_equity': row[8], 'trailing_pe': row[9],
             'trailing_eps_growth': row[10], 'surprise_avg': row[11],
             'surprise_last': row[12], 'surprise_n': row[13],
-            'earnings_date': row[14], 'fetched_at': fetched}
+            'earnings_date': row[14], 'short_float': row[15],
+            'short_change': row[16], 'short_ratio': row[17],
+            'short_date': row[18], 'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
@@ -387,8 +447,9 @@ def _save_metrics(ticker, sector, metrics):
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
             "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
             "debt_equity, trailing_pe, trailing_eps_growth, surprise_avg, "
-            "surprise_last, surprise_n, earnings_date, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "surprise_last, surprise_n, earnings_date, short_float, "
+            "short_change, short_ratio, short_date, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
@@ -397,6 +458,8 @@ def _save_metrics(ticker, sector, metrics):
              metrics.get('trailing_eps_growth'),
              metrics.get('surprise_avg'), metrics.get('surprise_last'),
              metrics.get('surprise_n'), metrics.get('earnings_date'),
+             metrics.get('short_float'), metrics.get('short_change'),
+             metrics.get('short_ratio'), metrics.get('short_date'),
              datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
@@ -441,6 +504,10 @@ def _apply_metrics(c, m):
         c['surpriseLast'] = m.get('surprise_last')
         c['surpriseN'] = m.get('surprise_n')
         c['earningsDate'] = m.get('earnings_date')
+        c['shortFloatPct'] = m.get('short_float')
+        c['shortChangePct'] = m.get('short_change')
+        c['shortRatio'] = m.get('short_ratio')
+        c['shortDate'] = m.get('short_date')
     return c
 
 
