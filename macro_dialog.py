@@ -1296,6 +1296,54 @@ class _IndicatorTab(QWidget):
         return ('Ставка в норме и стабильна — нейтрально для рынка, P/E без '
                 'давления.')
 
+    def cp_advice(self):
+        """Goat text for the Corporate Profits tab, or ''.
+
+        BEA after-tax corporate profits turn 2-3 quarters before S&P 500 EPS,
+        so the tab is a leading earnings signal. Uses point-based metrics that
+        match what the chart shows (calendar lookbacks misalign on quarterly
+        data): YoY growth g plus the latest quarter-over-quarter change
+        compared with the prior one.
+        """
+        if not self._values or not self._dates:
+            return ''
+        vals = self._values
+        if len(vals) < 2:
+            return ''
+        v = vals[-1]
+        if v != v:  # NaN
+            return ''
+        last = self._dates[-1]
+        i = bisect.bisect_right(
+            self._dates, last - datetime.timedelta(days=_YOY_DAYS)) - 1
+        if i < 0 or i >= len(vals) - 1:
+            return ''
+        vy = vals[i]
+        if vy == 0:
+            return ''
+        g = (v / vy - 1.0) * 100.0
+
+        d_now = v - vals[-2]
+        d_prev = (vals[-2] - vals[-3]) if len(vals) >= 3 else d_now
+
+        if g >= 5.0:
+            if d_now < d_prev:
+                return ('Корпоративные прибыли ещё растут, но темп падает — '
+                        'разворот впереди (до падения EPS ~2–3 квартала). '
+                        'Long аккуратно.')
+            return ('Корпоративные прибыли растут и ускоряются — EPS S&P 500 '
+                    'подкреплён. Держи long.')
+        if g < 0.0:
+            return ('Корпоративные прибыли падают — EPS S&P 500 ждёт '
+                    'снижение через 2–3 квартала. Выходи из long, риск '
+                    'распродажи.')
+        if abs(g) < 2.0:
+            return ('Прибыли стоят на месте — стагнация корпоративных '
+                    'прибылей сигналит о будущей распродаже. Осторожно с '
+                    'new long.')
+        return ('Корпоративные прибыли в норме — без явного сигнала для '
+                'EPS S&P 500.')
+
     def permits_advice(self):
         """Goat text for the Building Permits tab, or ''.
 
@@ -1672,6 +1720,7 @@ class MacroDialog(QDialog):
         self._cpi_tab = None
         self._unrate_tab = None
         self._fedfunds_tab = None
+        self._cp_tab = None
         self._nfib_tab = None
         self._ism_tab = None
         self._ism_services_tab = None
@@ -1786,6 +1835,8 @@ class MacroDialog(QDialog):
                 self._unrate_tab = tab
             elif series_id == 'FEDFUNDS':
                 self._fedfunds_tab = tab
+            elif series_id == 'CP':
+                self._cp_tab = tab
             elif series_id == 'UMCSENT':
                 tab._hlines = [55, 70, 80]
                 self._sentiment_tab = tab
@@ -2037,6 +2088,8 @@ class MacroDialog(QDialog):
                 self._late_data.get(_CIVPART_ID))
         elif widget is self._fedfunds_tab:
             advice = widget.fedfunds_advice()
+        elif widget is self._cp_tab:
+            advice = widget.cp_advice()
         elif widget is self._nfib_tab:
             advice = widget.nfib_advice()
         elif widget is self._sentiment_tab:
