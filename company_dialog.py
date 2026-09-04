@@ -26,8 +26,9 @@ _LABEL_SHORT_RU = {
 }
 
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
-            'Forward P/E', 'EPS growth %', 'PEG', 'Rel Momentum 1M',
-            'Rel Momentum 1Y', 'Company Score', 'Research status']
+            'Forward P/E', 'EPS growth %', 'PEG', 'Rev Growth %',
+            'Rel Momentum 1M', 'Rel Momentum 1Y', 'Company Score',
+            'Research status']
 
 # Коза для одной компании показывается не более 2 раз за запуск приложения
 # (иначе информационный перегруз). Счётчик в памяти — сбрасывается при рестарте.
@@ -252,6 +253,15 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             lines.append('• PEG: {:.2f}'.format(peg))
         else:
             lines.append('• PEG: -')
+        revg = s.get('revenue_growth')
+        pct_revg = s.get('pct_rev_growth')
+        if revg is not None and pct_revg is not None:
+            lines.append('• Revenue Growth (YoY): {:+.1f}% — выше {:.0f}% '
+                         'компаний {}'.format(revg, pct_revg, self._sector))
+        elif revg is not None:
+            lines.append('• Revenue Growth (YoY): {:+.1f}%'.format(revg))
+        else:
+            lines.append('• Revenue Growth (YoY): -')
         score = s.get('score_rounded')
         lines.append('• Company Score: {:+.2f}'.format(score)
                      if score is not None else '• Company Score: -')
@@ -331,6 +341,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 self._pe(s.get('forward_pe')),
                 self._fmt(s.get('eps_growth'), '%'),
                 self._peg(s.get('peg')),
+                self._fmt(s.get('revenue_growth'), '%'),
                 self._fmt(s.get('rel_momentum_1m'), '%'),
                 self._fmt(s.get('rel_momentum_1y'), '%'),
                 self._fmt(s.get('score_rounded')),
@@ -338,7 +349,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))
-                if c == 11:
+                if c == 12:
                     color = _LABEL_COLORS.get(label, _LABEL_COLORS[
                         company_quant.LABEL_INSUFFICIENT])
                     item.setBackground(QtGui.QColor(color))
@@ -361,7 +372,12 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                     item.setForeground(self._color_vs(
                         s.get('peg'), s.get('sector_median_peg'),
                         lower_better=True))
-                elif c in (4, 8, 9, 10):
+                elif c == 8:
+                    item.setForeground(self._color_vs(
+                        s.get('revenue_growth'),
+                        s.get('sector_median_rev_growth'),
+                        lower_better=False))
+                elif c in (4, 9, 10, 11):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
@@ -380,7 +396,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             return
         table = self.tabs.currentWidget()
         row = table.currentRow()
-        score_item = table.item(row, 10)
+        score_item = table.item(row, 11)
         quant = None
         if score_item and score_item.text() != '-':
             try:

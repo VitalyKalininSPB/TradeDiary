@@ -38,6 +38,8 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN forward_pe REAL")
     if cols and 'eps_growth' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN eps_growth REAL")
+    if cols and 'revenue_growth' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN revenue_growth REAL")
     return conn
 
 
@@ -78,7 +80,8 @@ def fetch_company_metrics(ticker):
         return None
     return {'net_margin': net_margin, 'net_margin_yoy': yoy,
             'return_1m': ret_1m, 'return_1y': ret_1y,
-            'forward_pe': sa['forward_pe'], 'eps_growth': sa['eps_growth']}
+            'forward_pe': sa['forward_pe'], 'eps_growth': sa['eps_growth'],
+            'revenue_growth': sa['revenue_growth']}
 
 
 def _stockanalysis_metrics(ticker):
@@ -126,8 +129,18 @@ def _stockanalysis_metrics(ticker):
                 eps_growth = eg
         except ValueError:
             eps_growth = None
+    revenue_growth = None
+    rg_raw = _grab(r'revenueGrowth:(-?[0-9.]+)', block)
+    if rg_raw:
+        try:
+            rg = float(rg_raw)
+            if rg == rg and rg > -100.0:
+                revenue_growth = rg
+        except ValueError:
+            revenue_growth = None
     return {'net_margin': margin, 'net_margin_yoy': yoy,
-            'forward_pe': forward_pe, 'eps_growth': eps_growth}
+            'forward_pe': forward_pe, 'eps_growth': eps_growth,
+            'revenue_growth': revenue_growth}
 
 
 def _yahoo_returns(ticker):
@@ -172,20 +185,20 @@ def _metrics_cached(ticker):
     try:
         row = conn.execute(
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
-            "forward_pe, eps_growth, fetched_at FROM company_metrics "
-            "WHERE ticker=?", (ticker,)).fetchone()
+            "forward_pe, eps_growth, revenue_growth, fetched_at "
+            "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[6])
+        fetched = datetime.datetime.fromisoformat(row[7])
     except ValueError:
         return None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
             'return_1m': row[2], 'return_1y': row[3],
             'forward_pe': row[4], 'eps_growth': row[5],
-            'fetched_at': fetched}
+            'revenue_growth': row[6], 'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
@@ -194,11 +207,12 @@ def _save_metrics(ticker, sector, metrics):
         conn.execute(
             "INSERT OR REPLACE INTO company_metrics "
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
-            "return_1y, forward_pe, eps_growth, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "return_1y, forward_pe, eps_growth, revenue_growth, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
+             metrics.get('revenue_growth'),
              datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
@@ -234,6 +248,7 @@ def _apply_metrics(c, m):
         c['return1yPct'] = m['return_1y']
         c['forwardPE'] = m.get('forward_pe')
         c['forwardEPSGrowth'] = m.get('eps_growth')
+        c['revenueGrowthPct'] = m.get('revenue_growth')
     return c
 
 

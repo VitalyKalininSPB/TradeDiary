@@ -6,7 +6,8 @@ data providers, без прогнозов доходности. Только н�
 
 Вход — CompanyQuantInput (dict):
   ticker, companyName, sector, netMarginPct?, netMarginYoyChangePp?,
-  return1mPct?, return1yPct?, benchmarkReturn1mPct?, benchmarkReturn1yPct?.
+  return1mPct?, return1yPct?, benchmarkReturn1mPct?, benchmarkReturn1yPct?,
+  forwardPE?, forwardEPSGrowth?, revenueGrowthPct?.
 
 Для ranking обязательны ticker, companyName, sector, netMarginPct, return1mPct,
 return1yPct, benchmarkReturn1mPct, benchmarkReturn1yPct. Отсутствующие значения
@@ -21,9 +22,11 @@ return1yPct, benchmarkReturn1mPct, benchmarkReturn1yPct. Отсутствующ�
   valuation  = -tanh(relForwardPE / 40)          # если forwardPE есть
   peg        = forwardPE / forwardEPSGrowth      # только при eps growth > 0
   growthAdjValuation = -tanh(relPEG / 0.5)       # если peg есть
+  revenueGrowth = tanh(relRevenueGrowth / 15)    # если revenueGrowthPct есть
   companyScore = (5·rp + 3·momentum + 2·marginTrend + 2·valuation
-                  + 2·growthAdjValuation) / (сумма доступных весов)
-                 # без valuation/trend/peg совпадает с исходной формулой
+                  + 2·growthAdjValuation + 2·revenueGrowth) /
+                 (сумма доступных весов)
+                 # без valuation/trend/peg/revgrowth совпадает с исходной
 """
 import math
 
@@ -46,11 +49,13 @@ W_MOM = 3
 W_TREND = 2
 W_VAL = 2
 W_PEG = 2
+W_REV = 2
 
 SCORE_RESEARCH = 0.35
 SCORE_LOW = -0.20
 SCALE_VAL = 40.0
 SCALE_PEG = 0.5
+SCALE_REV = 15.0
 
 
 def _finite(v):
@@ -98,6 +103,9 @@ def _flags(e):
     if (pct_pe is not None and pct_pe > 60
             and epsg is not None and epsg < 0):
         out.append('Дорогой без роста: высокая оценка при падающем EPS')
+    revg = e.get('revenue_growth')
+    if (revg is not None and revg > 0 and yoy is not None and yoy < 0):
+        out.append('Выручка растёт ({:+.1f}%), но маржа падает'.format(revg))
     if (yoy is not None and yoy > 0
             and e.get('rel_momentum_1m') is not None
             and e['rel_momentum_1m'] < 0):
@@ -122,6 +130,8 @@ def _contribs(e):
         parts.append(('Оценка', W_VAL, e['valuation']))
     if e.get('growth_adj_valuation') is not None:
         parts.append(('Оценка по росту (PEG)', W_PEG, e['growth_adj_valuation']))
+    if e.get('rev_growth') is not None:
+        parts.append(('Рост выручки', W_REV, e['rev_growth']))
     used = sum(w for _n, w, _v in parts)
     if not used:
         return []
@@ -157,8 +167,10 @@ def _evaluate(c):
         'benchmark_1y': c.get('benchmarkReturn1yPct'),
         'warnings': [], 'label': LABEL_INSUFFICIENT,
         'relative_profitability': None, 'momentum': None, 'margin_trend': None,
-        'valuation': None, 'growth_adj_valuation': None,
+        'valuation': None, 'growth_adj_valuation': None, 'rev_growth': None,
         'sector_median_pe': None, 'sector_median_peg': None, 'peg': None,
+        'revenue_growth': c.get('revenueGrowthPct'),
+        'sector_median_rev_growth': None, 'pct_rev_growth': None,
         'company_score': None, 'score_rounded': None, 'rank': None,
     }
     missing = [f for f in REQUIRED_FIELDS
@@ -180,6 +192,9 @@ def _evaluate(c):
     if e['eps_growth'] is not None and not _finite(e['eps_growth']):
         e['warnings'].append('non_finite_eps_growth')
         e['eps_growth'] = None
+    if e['revenue_growth'] is not None and not _finite(e['revenue_growth']):
+        e['warnings'].append('non_finite_revenue_growth')
+        e['revenue_growth'] = None
     e['_rankable'] = True
     return e
 
@@ -204,11 +219,15 @@ def _rank_sector(sector, companies):
         if peg is not None:
             pegs.append(peg)
     median_peg = sorted(pegs)[len(pegs) // 2] if pegs else None
+    revg = [e['revenue_growth'] for e in rankable
+            if e['revenue_growth'] is not None]
+    median_revg = sorted(revg)[len(revg) // 2] if revg else None
     for e in rankable:
         e['sector_median_margin'] = median
         e['sector_median_pe'] = median_pe
         e['sector_median_eps_growth'] = median_epsg
         e['sector_median_peg'] = median_peg
+        e['sector_median_rev_growth'] = median_revg
         rp = math.tanh((e['net_margin'] - avg) / 10.0)
         rel1m = e['return_1m'] - e['benchmark_1m']
         rel1y = e['return_1y'] - e['benchmark_1y']
@@ -223,6 +242,10 @@ def _rank_sector(sector, companies):
         if e['peg'] is not None and median_peg:
             rel_peg = (e['peg'] - median_peg) / median_peg
             growth_val = -math.tanh(rel_peg / SCALE_PEG)
+        rev_growth = None
+        if e['revenue_growth'] is not None and median_revg is not None:
+            rev_growth = math.tanh(
+                (e['revenue_growth'] - median_revg) / SCALE_REV)
         parts = [(W_RP, rp), (W_MOM, momentum)]
         if trend is not None:
             parts.append((W_TREND, trend))
@@ -230,6 +253,8 @@ def _rank_sector(sector, companies):
             parts.append((W_VAL, valuation))
         if growth_val is not None:
             parts.append((W_PEG, growth_val))
+        if rev_growth is not None:
+            parts.append((W_REV, rev_growth))
         used = sum(w for w, _ in parts)
         score = sum(w * c for w, c in parts) / used if used else None
         e['relative_profitability'] = rp
@@ -239,6 +264,7 @@ def _rank_sector(sector, companies):
         e['margin_trend'] = trend
         e['valuation'] = valuation
         e['growth_adj_valuation'] = growth_val
+        e['rev_growth'] = rev_growth
         e['company_score'] = score
         e['score_rounded'] = round(score, 2) if score is not None else None
         e['label'] = _label(score)
@@ -250,6 +276,7 @@ def _rank_sector(sector, companies):
         e['pct_margin'] = _percentile(e['net_margin'], margin_vals)
         e['pct_pe'] = _percentile(e['forward_pe'], pe_vals)
         e['pct_peg'] = _percentile(e['peg'], pegs)
+        e['pct_rev_growth'] = _percentile(e['revenue_growth'], revg)
         e['pct_mom_1m'] = _percentile(e['rel_momentum_1m'], mom1m_vals)
         e['pct_mom_1y'] = _percentile(e['rel_momentum_1y'], mom1y_vals)
         e['flags'] = _flags(e)
