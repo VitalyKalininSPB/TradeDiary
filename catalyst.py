@@ -187,71 +187,10 @@ def summary_for(ticker):
             'max': max(e['score'] for e in events)}
 
 
-def reminder_text(event, simulated=False):
+def reminder_text(event):
     """Одна строка напоминания по событию."""
-    parts = ['{}: катализатор «{}» — {}.'.format(
+    return '{}: катализатор «{}» — {}.{}'.format(
         event.get('ticker', ''), event.get('description') or 'событие',
-        event.get('date', ''))]
-    if event.get('expectation'):
-        parts.append('Ожидание: ' + event['expectation'])
-    text = ' '.join(parts)
-    return ('Симуляция: ' + text) if simulated else text
-
-
-# --------------------------------------------------------------------------
-# TEMP SIM — временная симуляция наступления дат для теста.
-# Первое событие тикера «наступает» через SIM_LEAD_MINUTES минут, каждое
-# следующее — ещё через SIM_INTERVAL_MINUTES. В памяти, сбрасывается при
-# рестарте приложения. Удалить после теста.
-# --------------------------------------------------------------------------
-import time as _time
-
-SIM_LEAD_MINUTES = 30
-SIM_INTERVAL_MINUTES = 7
-
-_SIM = {}  # event_id -> remind timestamp (epoch seconds)
-_SIM_TICKERS = set()
-
-
-def sim_schedule_ticker(ticker, lead_minutes=SIM_LEAD_MINUTES,
-                        interval_minutes=SIM_INTERVAL_MINUTES):
-    """Расписать события тикера на виртуальное наступление. Возвращает True,
-    если симуляция для тикера только что запущена (иначе новые события просто
-    добавляются к активному расписанию)."""
-    ticker = (ticker or '').strip().upper()
-    first = ticker not in _SIM_TICKERS
-    events = [e for e in events_for(ticker)
-              if not e['notified'] and e['id'] not in _SIM]
-    events.sort(key=lambda e: e['date'])
-    if not events:
-        return False
-    now = _time.time()
-    for i, e in enumerate(events):
-        _SIM[e['id']] = now + (lead_minutes + i * interval_minutes) * 60
-    _SIM_TICKERS.add(ticker)
-    return first
-
-
-def sim_pending():
-    """События, чьё виртуальное время наступления прошло (и ещё не показаны)."""
-    now = _time.time()
-    out = []
-    for eid, at in list(_SIM.items()):
-        if at <= now:
-            row = _get_event(eid)
-            if row and not row['notified']:
-                out.append(row)
-    return out
-
-
-def sim_has_scheduled():
-    return bool(_SIM)
-
-
-def sim_unschedule(eid):
-    _SIM.pop(eid, None)
-
-
-def sim_reset():
-    _SIM.clear()
-    _SIM_TICKERS.clear()
+        event.get('date', ''),
+        (' Ожидание: ' + event['expectation']) if event.get('expectation')
+        else '')

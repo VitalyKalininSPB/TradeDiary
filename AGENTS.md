@@ -126,13 +126,12 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   колонка Catalyst (живая суммарка из `catalyst.summary_for`, двойной клик —
   редактировать).
 - **Напоминания катализаторов**: `_CatalystReminderThread` в main.py — на старте +
-  часовой QTimer (реальные `due_events`), плюс TEMP SIM: `sim_schedule_ticker`/
-  `sim_pending` в catalyst.py (первое событие через 30 мин, дальше каждые 7 мин,
-  30-сек QTimer). Катализатор-уведомления идут через очередь `_notify_queue` и
+  часовой QTimer (реальные `due_events`: напоминание за сутки до даты и
+  просроченные). Катализатор-уведомления идут через очередь `_notify_queue` и
   показываются **с красным крестиком подтверждения** (`GoatAssistant(ok_button=True)`,
   сигнал `confirmed`): пользователь явно подтверждает прочтение, только потом
   показывается следующее; пока есть активное/очередное подтверждение, обычные
-  уведомления Козы подавляются (`_show_advice_goat`). TEMP-код удалить после теста.
+  уведомления Козы подавляются (`_show_advice_goat`).
 - `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
 

@@ -237,36 +237,24 @@ class _QuantAlertThread(QtCore.QThread):
 
 
 class _CatalystReminderThread(QtCore.QThread):
-    """Background check of catalyst reminders (local SQLite, no network).
+    """Background check of catalyst reminders (local SQLite, no network):
+    события «за сутки до даты» (и просроченные)."""
 
-    non-simulated — события «за сутки до даты» (и просроченные);
-    simulated (TEMP SIM) — события, чьё виртуальное время наступило.
-    """
-
-    reminders = QtCore.Signal(bool, list)
-
-    def __init__(self, simulated=False, parent=None):
-        super().__init__(parent)
-        self._simulated = simulated
+    reminders = QtCore.Signal(list)
 
     def run(self):
         msgs = []
         ids = []
         try:
             import catalyst
-            if self._simulated:
-                for e in catalyst.sim_pending():
-                    msgs.append(catalyst.reminder_text(e, simulated=True))
-                    ids.append(e['id'])
-            else:
-                for e in catalyst.due_events():
-                    msgs.append(catalyst.reminder_text(e))
-                    ids.append(e['id'])
+            for e in catalyst.due_events():
+                msgs.append(catalyst.reminder_text(e))
+                ids.append(e['id'])
             if ids:
                 catalyst.mark_notified(ids)
         except Exception as e:  # noqa: BLE001 - never break startup
             print('Catalyst reminder: {}'.format(e))
-        self.reminders.emit(self._simulated, msgs)
+        self.reminders.emit(msgs)
 
 
 class TradeDiary(QtWidgets.QMainWindow):
@@ -585,16 +573,13 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._catalystCheckThreads = []
         self._notify_queue = []
         self._active_confirm = None
-        self._start_catalyst_check(False)
+        self._start_catalyst_check()
         self._catalystTimer = QtCore.QTimer(self)
-        self._catalystTimer.timeout.connect(lambda: self._start_catalyst_check(False))
+        self._catalystTimer.timeout.connect(self._start_catalyst_check)
         self._catalystTimer.start(3600000)
-        self._catalystSimTimer = QtCore.QTimer(self)
-        self._catalystSimTimer.timeout.connect(lambda: self._start_catalyst_check(True))
-        self._catalystSimTimer.start(30000)
 
-    def _start_catalyst_check(self, simulated):
-        thread = _CatalystReminderThread(simulated, self)
+    def _start_catalyst_check(self):
+        thread = _CatalystReminderThread(self)
         thread.reminders.connect(self._on_catalyst_reminders)
         self._catalystCheckThreads.append(thread)
         thread.finished.connect(
@@ -602,7 +587,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             if t in self._catalystCheckThreads else None)
         thread.start()
 
-    def _on_catalyst_reminders(self, simulated, msgs):
+    def _on_catalyst_reminders(self, msgs):
         if not msgs:
             return
         for m in msgs:

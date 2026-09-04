@@ -205,7 +205,6 @@ class CatalystDialog(QtWidgets.QDialog):
         eid = catalyst.add_event(**v)
         if eid is None:
             return
-        self._maybe_start_sim()
         self._load_events()
 
     def _edit_event(self):
@@ -238,18 +237,7 @@ class CatalystDialog(QtWidgets.QDialog):
         if ret != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         catalyst.delete_event(e['id'])
-        catalyst.sim_unschedule(e['id'])
         self._load_events()
-
-    def _maybe_start_sim(self):
-        """TEMP SIM: автостарт симуляции наступления дат при добавлении."""
-        if catalyst.sim_schedule_ticker(self._ticker()):
-            QtWidgets.QMessageBox.information(
-                self, 'Catalyst',
-                'Симуляция наступления дат запущена:\n'
-                'первое событие — через {} мин, дальше каждые {} мин.'
-                .format(catalyst.SIM_LEAD_MINUTES,
-                        catalyst.SIM_INTERVAL_MINUTES))
 
     def _save_to_watchlist(self):
         ticker = self._ticker()
