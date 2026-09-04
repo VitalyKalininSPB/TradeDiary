@@ -14,7 +14,8 @@ _STATUS_COLORS = {
     'Owned': '#2e7d32',
 }
 
-_HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Qual', 'Quant', 'Note']
+_HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Qual', 'Quant',
+            'Catalyst', 'Note']
 
 
 class WatchlistEntryDialog(QtWidgets.QDialog):
@@ -78,6 +79,11 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
             parts.append('Quant: {:+.2f}'.format(snapshot['quant']))
         if snapshot.get('quant_sector'):
             parts.append('сектор: {}'.format(snapshot['quant_sector']))
+        if snapshot.get('catalyst') is not None:
+            cat = 'Catalyst: {:.2f}/5'.format(snapshot['catalyst'])
+            if snapshot.get('catalyst_dir'):
+                cat += ' ({})'.format(snapshot['catalyst_dir'])
+            parts.append(cat)
         if not parts:
             return 'нет снапшота'
         if date:
@@ -172,6 +178,7 @@ class WatchlistDialog(QtWidgets.QDialog):
                 e.get('reason', ''),
                 self._fmt(snap.get('qual'), '/5'),
                 self._fmt(snap.get('quant')),
+                self._fmt(snap.get('catalyst'), '/5'),
                 e.get('note', ''),
             ]
             for c, v in enumerate(vals):
@@ -180,9 +187,9 @@ class WatchlistDialog(QtWidgets.QDialog):
                     color = _STATUS_COLORS.get(v, _STATUS_COLORS['Research'])
                     item.setBackground(QColor(color))
                     item.setForeground(QColor('#ffffff'))
-                elif c == 6:
+                elif c == 7:
                     item.setToolTip(v)
-                elif c in (4, 5):
+                elif c in (4, 5, 6):
                     item.setForeground(QColor(_TXT))
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()

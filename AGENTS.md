@@ -112,6 +112,10 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
 - `candles_dialog.py`: свечной график по OHLC.
 - `correlation_dialog.py`: тепловая карта (seaborn).
 - `qualitative_dialog.py`: GoatAssistant (Clippy-аналог), опционально QtWebEngine.
+- `catalyst_dialog.py`: кнопка «Catalyst» в главном окне — встроенный браузер с
+  Google-поиском катализаторов по тикеру (как MOP, промт `CATALYST_PROMPT`
+  кодируется в URL < 2048) + оценка катализатора 0-5 (`StarRating`) в снапшот
+  watchlist (`catalyst`).
 - `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
 

@@ -271,6 +271,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.statementsButton.clicked.connect(self.statementsClicked)
         self.todayMacroButton.clicked.connect(self.todayMacroClicked)
         self.watchlistButton.clicked.connect(self.watchlistClicked)
+        self.catalystButton.clicked.connect(self.catalystClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
@@ -649,7 +650,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row2.setContentsMargins(0, 0, 0, 0)
         bottom_row2.setSpacing(8)
         for w in (self.clearDbButton, self.quantitiveAssessmentButton,
-                  self.qualitativeAssessmentButton, self.watchlistButton):
+                  self.qualitativeAssessmentButton, self.watchlistButton,
+                  self.catalystButton):
             bottom_row2.addWidget(w)
         bottom_row2.addStretch(1)
 
@@ -974,6 +976,15 @@ class TradeDiary(QtWidgets.QMainWindow):
         """Open the watchlist dialog (tickers added from Qualitative Assessment)."""
         from watchlist_dialog import WatchlistDialog
         dlg = WatchlistDialog(self)
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
+        self._dialogs_set().add(dlg)
+        dlg.show()
+
+    def catalystClicked(self):
+        """Open the Catalyst dialog (Google-поиск катализаторов по тикеру)."""
+        from catalyst_dialog import CatalystDialog
+        dlg = CatalystDialog(self)
         dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
         self._dialogs_set().add(dlg)
