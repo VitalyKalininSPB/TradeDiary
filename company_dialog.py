@@ -3,7 +3,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import company_data
 import company_quant
-import markets
 import recommendation_panel
 
 _TXT = '#dcdce0'
@@ -30,7 +29,7 @@ _LABEL_SHORT_RU = {
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
             'Forward P/E', 'EPS growth %', 'PEG', 'Rev Growth %',
             'ROIC %', 'Debt/Equity', 'Rel Momentum 1M', 'Rel Momentum 1Y',
-            'Company Score', 'Research status', 'Chart']
+            'Company Score', 'Research status', 'Сравнение с сектором']
 
 # Коза для одной компании показывается не более 2 раз за запуск приложения
 # (иначе информационный перегруз). Счётчик в памяти — сбрасывается при рестарте.
@@ -411,10 +410,11 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 elif c in (4, 10, 11, 12, 13):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
-            btn = QtWidgets.QPushButton('Chart')
+            btn = QtWidgets.QPushButton('Сравнение с сектором')
             btn.setFixedHeight(22)
-            ticker = s.get('ticker') or ''
-            btn.clicked.connect(lambda _=False, t=ticker: self._open_chart(t))
+            btn.setToolTip('4-столбцовые графики P/E и EPS growth '
+                           '(сектор/компания × сейчас/форвард) + рекомендация')
+            btn.clicked.connect(lambda _=False, row=s: self._open_chart(row))
             table.setCellWidget(r, len(_HEADERS) - 1, btn)
         table.resizeColumnsToContents()
 
@@ -426,16 +426,11 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             return item.text() if item else ''
         return ''
 
-    def _open_chart(self, ticker):
-        if not ticker:
+    def _open_chart(self, s):
+        if not s:
             return
-        from ma_chart_dialog import MAChartDialog
-        try:
-            _, currency = markets.market_currency(ticker)
-        except Exception:  # noqa: BLE001
-            currency = None
-        dlg = MAChartDialog(ticker, currency or markets.USD, '', '',
-                            self.window())
+        from recommendation_panel import RecommendationDialog
+        dlg = RecommendationDialog(s, self.window())
         dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         main = self.window()
         if hasattr(main, '_dialogs_set'):
