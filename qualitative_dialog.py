@@ -149,7 +149,10 @@ class GoatAssistant(QWidget):
     _MAX_TEXT_W = 220
     _BUBBLE_PAD = 16
 
-    def __init__(self, ticker, parent=None, advice=None, auto_hide_ms=0):
+    confirmed = Signal()
+
+    def __init__(self, ticker, parent=None, advice=None, auto_hide_ms=0,
+                 ok_button=False):
         super().__init__(parent)
         self._src = QPixmap(GOAT_IMAGE)
         if self._src.isNull():
@@ -177,6 +180,8 @@ class GoatAssistant(QWidget):
         self._text_rect = QRect(0, 0, self._text_w, self._text_h)
         self._bubble_w = max(self._text_w + 2 * self._BUBBLE_PAD, 160)
         self._bubble_h = max(self._text_h + 2 * self._BUBBLE_PAD, 70)
+        self._cross_pad = 30 if ok_button else 0
+        self._bubble_w += self._cross_pad
         gap = 14
         self.setFixedSize(self._bubble_w + gap + self._pixmap.width(),
                           max(self._bubble_h, self._pixmap.height()))
@@ -185,7 +190,26 @@ class GoatAssistant(QWidget):
                             | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        if ok_button:
+            self._add_close_button()
         self._place(parent)
+
+    def _add_close_button(self):
+        btn = QPushButton('\u2715', self)
+        btn.setFixedSize(20, 20)
+        btn.setStyleSheet(
+            'QPushButton { background-color: #2a2b30; color: #ef5350; '
+            'border: 1px solid #ef5350; border-radius: 10px; '
+            'font-weight: bold; font-size: 13px; }'
+            'QPushButton:hover { background-color: #4a2a2e; }')
+        btn.move(8 + self._bubble_w - 26, 8)
+        btn.setToolTip('Подтвердить прочтение')
+        btn.clicked.connect(self._on_ok)
+        self._okBtn = btn
+
+    def _on_ok(self):
+        self.confirmed.emit()
+        self.close()
 
     def _place(self, parent=None):
         """Anchor to the bottom-right corner of the screen, not the window.

@@ -1,109 +1,264 @@
 # -*- coding: utf-8 -*-
 import datetime
 
-from urllib.parse import quote_plus
-
 from PySide6 import QtWidgets
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtGui import QColor
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except Exception:  # pragma: no cover - fallback
-    QWebEngineView = None
-
-# Промт Catalyst. Компактный, чтобы URL Google-поиска помещался в лимит ~2048
-# символов (кириллица кодируется в 4-6 раз длиннее).
-CATALYST_PROMPT = """Катализаторы [ТИКЕР] на 20–60 торговых дней. Перечисли ближайшие события, способные двинуть акцию: отчётность и guidance, запуск продукта, регуляторное решение, суд, сделка M&A. Для каждого: что именно, дата, как проверить, ожидаемый эффект (+/−) и масштаб. Отметь, что, по-видимому, уже в цене. Выдели один главный катализатор. Ссылки и даты. Пиши по-русски."""
+import catalyst
 
 # Шкала оценки катализатора (0-5, как звёзды Qualitative Assessment).
-CATALYST_SCALE = """0 — нет катализатора;
+CATALYST_SCALE = """Оценка отчётливости события:
+0 — нет катализатора;
 1–2 — расплывчатый («когда-нибудь станет лучше»);
 3–4 — чёткое событие с датой и ожидаемым эффектом;
 5 — близко, проверяемо и не заложено в цену."""
 
-_DIRECTIONS = ['+', '−', '±']
-
 _TXT = '#dcdce0'
+_RED = '#ef5350'
+
+_EV_HEADERS = ['Дата', 'Балл', 'Напр', 'Описание', 'Ожидание']
+
+
+def _date_to_q(date_str):
+    try:
+        d = datetime.date.fromisoformat(date_str)
+    except (TypeError, ValueError):
+        d = datetime.date.today()
+    return QDate(d.year, d.month, d.day)
+
+
+class CatalystEventDialog(QtWidgets.QDialog):
+    """Форма добавления/правки события-катализатора (дата + оценка + ожидание).
+
+    В табе Events watchlist тикер выбирается (options); в CatalystDialog
+    тикер фиксирован текущим тикером.
+    """
+
+    def __init__(self, parent=None, ticker='', options=None, event=None):
+        super().__init__(parent)
+        self.setWindowTitle('Catalyst event')
+        self.setMinimumWidth(520)
+
+        form = QtWidgets.QFormLayout(self)
+
+        if options:
+            self.tickerCombo = QtWidgets.QComboBox()
+            self.tickerCombo.setEditable(True)
+            self.tickerCombo.addItems([t for t in options if t])
+            self.tickerCombo.setCurrentText(ticker or '')
+            form.addRow('Ticker:', self.tickerCombo)
+
+        self.dateEdit = QtWidgets.QDateEdit()
+        self.dateEdit.setCalendarPopup(True)
+        self.dateEdit.setDisplayFormat('yyyy-MM-dd')
+        self.dateEdit.setDate(_date_to_q(event['date']) if event
+                              else QDate.currentDate().addDays(1))
+        form.addRow('Дата:', self.dateEdit)
+
+        from qualitative_dialog import StarRating
+        self.starRating = StarRating()
+        self.starRating.setRating(event['score'] if event else 0)
+        rating_lbl = QtWidgets.QLabel('Оценка (0-5):')
+        rating_lbl.setToolTip(CATALYST_SCALE)
+        form.addRow(rating_lbl, self.starRating)
+
+        self.directionCombo = QtWidgets.QComboBox()
+        self.directionCombo.addItems(catalyst._DIRECTIONS)
+        if event:
+            self.directionCombo.setCurrentText(event.get('direction') or '+')
+        form.addRow('Направление:', self.directionCombo)
+
+        self.descEdit = QtWidgets.QLineEdit()
+        self.descEdit.setPlaceholderText('Что за событие…')
+        if event:
+            self.descEdit.setText(event.get('description') or '')
+        form.addRow('Описание:', self.descEdit)
+
+        self.expectEdit = QtWidgets.QTextEdit()
+        self.expectEdit.setFixedHeight(72)
+        self.expectEdit.setPlaceholderText('Что ожидаем: какой исход/метрика '
+                                           'будет позитивным/негативным '
+                                           'сюрпризом…')
+        if event:
+            self.expectEdit.setPlainText(event.get('expectation') or '')
+        form.addRow('Ожидание:', self.expectEdit)
+
+        row = QtWidgets.QHBoxLayout()
+        ok = QtWidgets.QPushButton('OK')
+        cancel = QtWidgets.QPushButton('Cancel')
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        form.addRow(row)
+
+    def values(self):
+        ticker = ''
+        if hasattr(self, 'tickerCombo'):
+            ticker = self.tickerCombo.currentText().strip().upper()
+        return {
+            'ticker': ticker,
+            'date': self.dateEdit.date().toString('yyyy-MM-dd'),
+            'score': self.starRating.rating(),
+            'direction': self.directionCombo.currentText(),
+            'description': self.descEdit.text().strip(),
+            'expectation': self.expectEdit.toPlainText().strip(),
+        }
 
 
 class CatalystDialog(QtWidgets.QDialog):
-    """Встроенный браузер с Google-поиском катализаторов по тикеру (как MOP)
-    + быстрый ввод оценки катализатора в watchlist."""
+    """Многособытийный менеджер катализаторов по тикеру: таблица событий
+    с датами/оценками/ожиданиями, сохранение в watchlist."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, ticker=''):
         super().__init__(parent)
         self.setWindowTitle('Catalyst')
-        self.resize(980, 680)
+        self.resize(760, 560)
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
 
         row = QtWidgets.QHBoxLayout()
         lbl = QtWidgets.QLabel('Ticker:')
-        self.tickerEdit = QtWidgets.QLineEdit()
+        self.tickerEdit = QtWidgets.QLineEdit(ticker or '')
+        self.tickerEdit.setReadOnly(True)
         self.tickerEdit.setFixedHeight(28)
-        self.askButton = QtWidgets.QPushButton('Ask')
         row.addWidget(lbl)
         row.addWidget(self.tickerEdit, 1)
-        row.addWidget(self.askButton)
         root.addLayout(row)
 
-        if QWebEngineView is None:
-            self.webView = QtWidgets.QLabel('QtWebEngine is not available.')
-            root.addWidget(self.webView, 1)
-        else:
-            self.webView = QWebEngineView()
-            root.addWidget(self.webView, 1)
+        self._build_events(root)
 
-        self._build_result_bar(root)
-
-        self.askButton.clicked.connect(self._ask)
-        self.tickerEdit.returnPressed.connect(self._ask)
+        self.tickerEdit.textChanged.connect(self._load_events)
+        self.addButton.clicked.connect(self._add_event)
+        self.editButton.clicked.connect(self._edit_event)
+        self.deleteButton.clicked.connect(self._delete_event)
         self.saveButton.clicked.connect(self._save_to_watchlist)
-        self.saveButton.setEnabled(False)
-        self._ticker = ''
-        self._rating = 0
+        self._events = []
+        self._load_events()
 
-    def _build_result_bar(self, root):
+    def _ticker(self):
+        return self.tickerEdit.text().strip().upper()
+
+    def _build_events(self, root):
         bar = QtWidgets.QHBoxLayout()
-        from qualitative_dialog import StarRating
-        rating_lbl = QtWidgets.QLabel('Catalyst (0-5):')
-        rating_lbl.setToolTip(CATALYST_SCALE)
-        rating_lbl.setStyleSheet('color: {};'.format(_TXT))
-        self.starRating = StarRating()
-        self.directionCombo = QtWidgets.QComboBox()
-        self.directionCombo.addItems(_DIRECTIONS)
-        self.noteEdit = QtWidgets.QLineEdit()
-        self.noteEdit.setPlaceholderText('Что / когда / как проверить…')
+        bar_lbl = QtWidgets.QLabel('События:')
+        bar_lbl.setStyleSheet('color: {};'.format(_TXT))
+        self.addButton = QtWidgets.QPushButton('Add')
+        self.editButton = QtWidgets.QPushButton('Edit')
+        self.deleteButton = QtWidgets.QPushButton('Delete')
         self.saveButton = QtWidgets.QPushButton('Save to Watchlist')
-        bar.addWidget(rating_lbl)
-        bar.addWidget(self.starRating)
-        bar.addWidget(self.directionCombo)
-        bar.addWidget(self.noteEdit, 1)
+        bar.addWidget(bar_lbl)
+        bar.addSpacing(6)
+        bar.addWidget(self.addButton)
+        bar.addWidget(self.editButton)
+        bar.addWidget(self.deleteButton)
+        bar.addStretch(1)
         bar.addWidget(self.saveButton)
         root.addLayout(bar)
-        self.starRating.ratingChanged.connect(self._on_rating_changed)
 
-    def _ask(self):
-        self._ticker = self.tickerEdit.text().strip().upper()
-        if not self._ticker:
+        self.table = QtWidgets.QTableWidget(0, len(_EV_HEADERS))
+        self.table.setHorizontalHeaderLabels(_EV_HEADERS)
+        self.table.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setMinimumHeight(150)
+        self.table.itemDoubleClicked.connect(lambda *_: self._edit_event())
+        self.table.horizontalHeader().setStretchLastSection(True)
+        root.addWidget(self.table)
+
+    # ------------------------------------------------------------ данные
+    def _load_events(self):
+        ticker = self._ticker()
+        self._events = catalyst.events_for(ticker)
+        self.table.setRowCount(len(self._events))
+        today = datetime.date.today().isoformat()
+        for r, e in enumerate(self._events):
+            vals = [e['date'], str(e['score']), e['direction'],
+                    e['description'], e['expectation']]
+            for c, v in enumerate(vals):
+                item = QtWidgets.QTableWidgetItem(v)
+                if c == 0 and e['date'] <= today:
+                    item.setForeground(QColor(_RED))
+                elif c in (1, 2):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(r, c, item)
+        self.table.resizeColumnsToContents()
+
+    # -------------------------------------------------------------- actions
+    def _add_event(self):
+        ticker = self._ticker()
+        if not ticker:
+            QtWidgets.QMessageBox.information(
+                self, 'Catalyst', 'Введите тикер.')
             return
-        prompt = CATALYST_PROMPT.replace('[ТИКЕР]', self._ticker)
-        if QWebEngineView is not None:
-            url = 'https://www.google.com/search?q=' + quote_plus(prompt) + '&udm=50'
-            self.webView.load(url)
-        self.saveButton.setEnabled(True)
+        dlg = CatalystEventDialog(parent=self, ticker=ticker)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        v = dlg.values()
+        v['ticker'] = ticker
+        eid = catalyst.add_event(**v)
+        if eid is None:
+            return
+        self._maybe_start_sim()
+        self._load_events()
 
-    def _on_rating_changed(self, value):
-        self._rating = value
+    def _edit_event(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._events)):
+            return
+        e = self._events[row]
+        dlg = CatalystEventDialog(parent=self, ticker=e['ticker'], event=e)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        v = dlg.values()
+        catalyst.update_event(e['id'], date=v['date'], score=v['score'],
+                              direction=v['direction'],
+                              description=v['description'],
+                              expectation=v['expectation'])
+        self._load_events()
+
+    def _delete_event(self):
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._events)):
+            return
+        e = self._events[row]
+        ret = QtWidgets.QMessageBox.question(
+            self, 'Delete event',
+            'Удалить событие «{}» ({})?'.format(
+                e.get('description') or 'без описания', e['date']),
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        catalyst.delete_event(e['id'])
+        catalyst.sim_unschedule(e['id'])
+        self._load_events()
+
+    def _maybe_start_sim(self):
+        """TEMP SIM: автостарт симуляции наступления дат при добавлении."""
+        if catalyst.sim_schedule_ticker(self._ticker()):
+            QtWidgets.QMessageBox.information(
+                self, 'Catalyst',
+                'Симуляция наступления дат запущена:\n'
+                'первое событие — через {} мин, дальше каждые {} мин.'
+                .format(catalyst.SIM_LEAD_MINUTES,
+                        catalyst.SIM_INTERVAL_MINUTES))
 
     def _save_to_watchlist(self):
-        ticker = self._ticker or self.tickerEdit.text().strip().upper()
+        ticker = self._ticker()
         if not ticker:
             return
-        snapshot = {'catalyst': self._rating,
-                    'catalyst_dir': self.directionCombo.currentText(),
-                    'catalyst_note': self.noteEdit.text().strip(),
-                    'date': datetime.date.today().isoformat()}
+        snapshot = {'date': datetime.date.today().isoformat()}
+        summary = catalyst.summary_for(ticker)
+        if summary:
+            snapshot['catalyst'] = summary
         from watchlist import add as watchlist_add
         from watchlist_dialog import WatchlistEntryDialog
         dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snapshot, parent=self)
@@ -114,7 +269,7 @@ class CatalystDialog(QtWidgets.QDialog):
                             snapshot=snapshot)
         QtWidgets.QMessageBox.information(
             self, 'Watchlist',
-            '{} {} в watchlist (Catalyst {}/5).'.format(
+            '{} {} в watchlist{}.'.format(
                 v['ticker'],
                 'добавлен' if res == 'added' else 'обновлён',
-                self._rating))
+                ' · {} событий'.format(summary['count']) if summary else ''))

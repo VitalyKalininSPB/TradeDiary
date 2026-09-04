@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
+import datetime
+
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
+import catalyst
 import markets
 import watchlist
 
 _TXT = '#dcdce0'
+_RED = '#ef5350'
+_LINK = '#7aa2f7'
 _STATUS_COLORS = {
     'Research': '#3a5a8c',
     'Watching': '#9a6b1f',
@@ -16,6 +21,7 @@ _STATUS_COLORS = {
 
 _HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Qual', 'Quant',
             'Catalyst', 'Note']
+_EV_HEADERS = ['Ticker', 'Дата', 'Балл', 'Напр', 'Описание', 'Ожидание']
 
 
 class WatchlistEntryDialog(QtWidgets.QDialog):
@@ -79,11 +85,13 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
             parts.append('Quant: {:+.2f}'.format(snapshot['quant']))
         if snapshot.get('quant_sector'):
             parts.append('сектор: {}'.format(snapshot['quant_sector']))
-        if snapshot.get('catalyst') is not None:
-            cat = 'Catalyst: {:.2f}/5'.format(snapshot['catalyst'])
-            if snapshot.get('catalyst_dir'):
-                cat += ' ({})'.format(snapshot['catalyst_dir'])
-            parts.append(cat)
+        cat = snapshot.get('catalyst')
+        if isinstance(cat, dict) and cat.get('count'):
+            parts.append('Catalyst: {} событий · ближайшее {} · макс {}/5'
+                         .format(cat['count'], cat.get('next', '-'),
+                                 cat.get('max', '-')))
+        elif isinstance(cat, (int, float)):
+            parts.append('Catalyst: {:.2f}/5'.format(cat))
         if not parts:
             return 'нет снапшота'
         if date:
@@ -109,6 +117,12 @@ class WatchlistDialog(QtWidgets.QDialog):
         self.resize(960, 460)
 
         root = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+
+        # ------------------------------------------------ таб Watchlist
+        wtab = QtWidgets.QWidget()
+        wlay = QtWidgets.QVBoxLayout(wtab)
+        wlay.setContentsMargins(0, 0, 0, 0)
         self.table = QtWidgets.QTableWidget(0, len(_HEADERS))
         self.table.setHorizontalHeaderLabels(_HEADERS)
         self.table.setEditTriggers(
@@ -119,29 +133,32 @@ class WatchlistDialog(QtWidgets.QDialog):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.itemDoubleClicked.connect(lambda *_: self._edit())
-        root.addWidget(self.table, 1)
+        self.table.cellDoubleClicked.connect(self._on_table_double)
+        wlay.addWidget(self.table, 1)
 
         row = QtWidgets.QHBoxLayout()
         self.addButton = QtWidgets.QPushButton('Add')
         self.editButton = QtWidgets.QPushButton('Edit')
         self.removeButton = QtWidgets.QPushButton('Remove')
         self.chartButton = QtWidgets.QPushButton('Chart')
+        self.catalystButton = QtWidgets.QPushButton('Catalyst')
         self.testNotifyButton = QtWidgets.QPushButton('Test notify (15s)')
         self.closeButton = QtWidgets.QPushButton('Close')
         row.addWidget(self.addButton)
         row.addWidget(self.editButton)
         row.addWidget(self.removeButton)
         row.addWidget(self.chartButton)
+        row.addWidget(self.catalystButton)
         row.addWidget(self.testNotifyButton)
         row.addStretch(1)
         row.addWidget(self.closeButton)
-        root.addLayout(row)
+        wlay.addLayout(row)
 
         self.addButton.clicked.connect(self._add)
         self.editButton.clicked.connect(self._edit)
         self.removeButton.clicked.connect(self._remove)
         self.chartButton.clicked.connect(self._chart)
+        self.catalystButton.clicked.connect(self._catalyst)
         self.testNotifyButton.clicked.connect(self._test_notify)
         self.closeButton.clicked.connect(self.close)
         self._test_timer = None
@@ -158,19 +175,63 @@ class WatchlistDialog(QtWidgets.QDialog):
         sim_row.addWidget(self.simCompanyButton)
         sim_row.addWidget(self.simSequenceButton)
         sim_row.addStretch(1)
-        root.addLayout(sim_row)
+        wlay.addLayout(sim_row)
         self.simSectorButton.clicked.connect(self._simulate_sector)
         self.simCompanyButton.clicked.connect(self._simulate_company)
         self.simSequenceButton.clicked.connect(self._simulate_sequence)
 
+        # -------------------------------------------------- таб Events
+        etab = QtWidgets.QWidget()
+        elay = QtWidgets.QVBoxLayout(etab)
+        elay.setContentsMargins(0, 0, 0, 0)
+        self.eventsTable = QtWidgets.QTableWidget(0, len(_EV_HEADERS))
+        self.eventsTable.setHorizontalHeaderLabels(_EV_HEADERS)
+        self.eventsTable.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        self.eventsTable.verticalHeader().setVisible(False)
+        self.eventsTable.horizontalHeader().setStretchLastSection(True)
+        self.eventsTable.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.eventsTable.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.eventsTable.itemDoubleClicked.connect(lambda *_: self._edit_event())
+        elay.addWidget(self.eventsTable, 1)
+
+        erow = QtWidgets.QHBoxLayout()
+        self.evAddButton = QtWidgets.QPushButton('Add')
+        self.evEditButton = QtWidgets.QPushButton('Edit')
+        self.evDeleteButton = QtWidgets.QPushButton('Delete')
+        self.evRefreshButton = QtWidgets.QPushButton('Refresh')
+        erow.addWidget(self.evAddButton)
+        erow.addWidget(self.evEditButton)
+        erow.addWidget(self.evDeleteButton)
+        erow.addWidget(self.evRefreshButton)
+        erow.addStretch(1)
+        elay.addLayout(erow)
+        self.evAddButton.clicked.connect(self._add_event)
+        self.evEditButton.clicked.connect(self._edit_event)
+        self.evDeleteButton.clicked.connect(self._delete_event)
+        self.evRefreshButton.clicked.connect(self._refresh_events)
+
+        self.tabs.addTab(wtab, 'Watchlist')
+        self.tabs.addTab(etab, 'Events')
+        root.addWidget(self.tabs, 1)
+
+        self._events = []
         self._refresh()
 
     def _refresh(self):
         entries = watchlist.load()
         self._entries = entries
         self.table.setRowCount(len(entries))
+        today = datetime.date.today().isoformat()
         for r, e in enumerate(entries):
             snap = e.get('snapshot') or {}
+            summary = catalyst.summary_for(e.get('ticker', ''))
+            cat_txt = ''
+            if summary:
+                cat_txt = '{} · {} · {}/5'.format(
+                    summary['count'], summary['next'], summary['max'])
             vals = [
                 e.get('ticker', ''),
                 e.get('status', watchlist.DEFAULT_STATUS),
@@ -178,7 +239,7 @@ class WatchlistDialog(QtWidgets.QDialog):
                 e.get('reason', ''),
                 self._fmt(snap.get('qual'), '/5'),
                 self._fmt(snap.get('quant')),
-                self._fmt(snap.get('catalyst'), '/5'),
+                cat_txt,
                 e.get('note', ''),
             ]
             for c, v in enumerate(vals):
@@ -189,16 +250,131 @@ class WatchlistDialog(QtWidgets.QDialog):
                     item.setForeground(QColor('#ffffff'))
                 elif c == 7:
                     item.setToolTip(v)
-                elif c in (4, 5, 6):
+                elif c in (4, 5):
                     item.setForeground(QColor(_TXT))
+                elif c == 6:
+                    due = summary and summary['next'] <= today
+                    item.setForeground(QColor(_RED if due else _LINK))
+                    f = item.font()
+                    f.setUnderline(True)
+                    item.setFont(f)
+                    if summary:
+                        item.setToolTip(
+                            'Двойной клик — редактировать катализаторы.\n'
+                            '{} событий · ближайшее {} · макс {}/5'.format(
+                                summary['count'], summary['next'],
+                                summary['max']))
+                    else:
+                        item.setToolTip(
+                            'Двойной клик — добавить катализаторы.')
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()
+        self._refresh_events()
+
+    def _refresh_events(self):
+        self._events = catalyst.all_events()
+        self.eventsTable.setRowCount(len(self._events))
+        today = datetime.date.today().isoformat()
+        for r, e in enumerate(self._events):
+            vals = [e['ticker'], e['date'], str(e['score']), e['direction'],
+                    e['description'], e['expectation']]
+            for c, v in enumerate(vals):
+                item = QtWidgets.QTableWidgetItem(v)
+                if c == 1 and e['date'] <= today:
+                    item.setForeground(QColor(_RED))
+                self.eventsTable.setItem(r, c, item)
+        self.eventsTable.resizeColumnsToContents()
+
+    def _ticker_options(self):
+        return [e.get('ticker', '') for e in self._entries if e.get('ticker')]
+
+    def _add_event(self):
+        from catalyst_dialog import CatalystEventDialog
+        dlg = CatalystEventDialog(parent=self, options=self._ticker_options())
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        v = dlg.values()
+        if not v['ticker']:
+            return
+        catalyst.add_event(**v)
+        self._maybe_start_sim(v['ticker'])
+        self._refresh()
+
+    def _edit_event(self):
+        row = self.eventsTable.currentRow()
+        if not (0 <= row < len(self._events)):
+            return
+        e = self._events[row]
+        from catalyst_dialog import CatalystEventDialog
+        dlg = CatalystEventDialog(parent=self, ticker=e['ticker'],
+                                  options=self._ticker_options(), event=e)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        v = dlg.values()
+        catalyst.update_event(e['id'], date=v['date'], score=v['score'],
+                              direction=v['direction'],
+                              description=v['description'],
+                              expectation=v['expectation'])
+        self._refresh()
+
+    def _delete_event(self):
+        row = self.eventsTable.currentRow()
+        if not (0 <= row < len(self._events)):
+            return
+        e = self._events[row]
+        ret = QtWidgets.QMessageBox.question(
+            self, 'Delete event',
+            'Удалить событие «{}» ({}) у {}?'.format(
+                e.get('description') or 'без описания', e['date'],
+                e['ticker']),
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        catalyst.delete_event(e['id'])
+        catalyst.sim_unschedule(e['id'])
+        self._refresh()
+
+    def _maybe_start_sim(self, ticker):
+        """TEMP SIM: автостарт симуляции наступления дат при добавлении."""
+        if catalyst.sim_schedule_ticker(ticker):
+            QtWidgets.QMessageBox.information(
+                self, 'Catalyst',
+                'Симуляция наступления дат для {} запущена:\n'
+                'первое событие — через {} мин, дальше каждые {} мин.'
+                .format(ticker, catalyst.SIM_LEAD_MINUTES,
+                        catalyst.SIM_INTERVAL_MINUTES))
+
+    def _catalyst(self):
+        entry = self._selected()
+        if entry is None:
+            return
+        ticker = entry.get('ticker', '')
+        if not ticker:
+            return
+        from catalyst_dialog import CatalystDialog
+        main = self.window()
+        dlg = CatalystDialog(main, ticker=ticker)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        if hasattr(main, '_dialogs_set'):
+            main._dialogs_set().add(dlg)
+            dlg.destroyed.connect(lambda obj=None, d=dlg:
+                                  main._dialogs_set().discard(d))
+        dlg.show()
+        dlg.finished.connect(lambda *_: self._refresh())
 
     def _selected(self):
         row = self.table.currentRow()
         if 0 <= row < len(self._entries):
             return self._entries[row]
         return None
+
+    def _on_table_double(self, row, col):
+        if col == 6:
+            self._catalyst()
+        else:
+            self._edit()
 
     def _add(self):
         dlg = WatchlistEntryDialog(snapshot={}, parent=self)

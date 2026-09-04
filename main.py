@@ -236,6 +236,39 @@ class _QuantAlertThread(QtCore.QThread):
         self.done.emit()
 
 
+class _CatalystReminderThread(QtCore.QThread):
+    """Background check of catalyst reminders (local SQLite, no network).
+
+    non-simulated — события «за сутки до даты» (и просроченные);
+    simulated (TEMP SIM) — события, чьё виртуальное время наступило.
+    """
+
+    reminders = QtCore.Signal(bool, list)
+
+    def __init__(self, simulated=False, parent=None):
+        super().__init__(parent)
+        self._simulated = simulated
+
+    def run(self):
+        msgs = []
+        ids = []
+        try:
+            import catalyst
+            if self._simulated:
+                for e in catalyst.sim_pending():
+                    msgs.append(catalyst.reminder_text(e, simulated=True))
+                    ids.append(e['id'])
+            else:
+                for e in catalyst.due_events():
+                    msgs.append(catalyst.reminder_text(e))
+                    ids.append(e['id'])
+            if ids:
+                catalyst.mark_notified(ids)
+        except Exception as e:  # noqa: BLE001 - never break startup
+            print('Catalyst reminder: {}'.format(e))
+        self.reminders.emit(self._simulated, msgs)
+
+
 class TradeDiary(QtWidgets.QMainWindow):
     def __init__(self):
         super(TradeDiary, self).__init__()
@@ -271,7 +304,6 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.statementsButton.clicked.connect(self.statementsClicked)
         self.todayMacroButton.clicked.connect(self.todayMacroClicked)
         self.watchlistButton.clicked.connect(self.watchlistClicked)
-        self.catalystButton.clicked.connect(self.catalystClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.tradeTableView.setColumnWidth(12, 70)
@@ -550,6 +582,66 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._quantAlertThread = _QuantAlertThread(self)
         self._quantAlertThread.done.connect(self._on_quant_alerts_done)
         self._quantAlertThread.start()
+        self._catalystCheckThreads = []
+        self._notify_queue = []
+        self._active_confirm = None
+        self._start_catalyst_check(False)
+        self._catalystTimer = QtCore.QTimer(self)
+        self._catalystTimer.timeout.connect(lambda: self._start_catalyst_check(False))
+        self._catalystTimer.start(3600000)
+        self._catalystSimTimer = QtCore.QTimer(self)
+        self._catalystSimTimer.timeout.connect(lambda: self._start_catalyst_check(True))
+        self._catalystSimTimer.start(30000)
+
+    def _start_catalyst_check(self, simulated):
+        thread = _CatalystReminderThread(simulated, self)
+        thread.reminders.connect(self._on_catalyst_reminders)
+        self._catalystCheckThreads.append(thread)
+        thread.finished.connect(
+            lambda t=thread: self._catalystCheckThreads.remove(t)
+            if t in self._catalystCheckThreads else None)
+        thread.start()
+
+    def _on_catalyst_reminders(self, simulated, msgs):
+        if not msgs:
+            return
+        for m in msgs:
+            self._notify_queue.append((m, True))
+        self._flush_notifications()
+
+    def _flush_notifications(self):
+        """Показывать уведомления по очереди. Confirm-уведомления (с крестиком)
+        блокируют все остальные, пока пользователь не подтвердит прочтение."""
+        if getattr(self, '_active_confirm', None) is not None:
+            return
+        if not self._notify_queue:
+            return
+        msg, confirm = self._notify_queue.pop(0)
+        if confirm:
+            self._active_confirm = self._show_goat(msg, confirm=True)
+        else:
+            self._show_goat(msg, confirm=False, auto_hide_ms=6000)
+
+    def _show_goat(self, advice, confirm=False, auto_hide_ms=0):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+            self._goat = None
+        self._goat = GoatAssistant('', self, advice=advice,
+                                   auto_hide_ms=auto_hide_ms,
+                                   ok_button=confirm)
+        if confirm:
+            self._goat.confirmed.connect(self._on_confirm_dismissed)
+        self._goat.show()
+        return self._goat
+
+    def _on_confirm_dismissed(self):
+        self._active_confirm = None
+        if getattr(self, '_goat', None) is not None:
+            self._goat.deleteLater()
+            self._goat = None
+        self._flush_notifications()
 
     def _on_quant_alerts_done(self):
         self._show_advice_goat()
@@ -650,8 +742,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row2.setContentsMargins(0, 0, 0, 0)
         bottom_row2.setSpacing(8)
         for w in (self.clearDbButton, self.quantitiveAssessmentButton,
-                  self.qualitativeAssessmentButton, self.watchlistButton,
-                  self.catalystButton):
+                  self.qualitativeAssessmentButton, self.watchlistButton):
             bottom_row2.addWidget(w)
         bottom_row2.addStretch(1)
 
@@ -712,6 +803,9 @@ class TradeDiary(QtWidgets.QMainWindow):
         t = getattr(self, '_macroThread', None)
         if t is not None and t.isRunning():
             t.wait(5000)
+        for ct in list(getattr(self, '_catalystCheckThreads', [])):
+            if ct.isRunning():
+                ct.wait(5000)
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
@@ -770,10 +864,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         'перекладывайтесь в защиту (Utilities, Consumer Staples, Healthcare).')
 
     def _show_advice_goat(self):
-        from qualitative_dialog import GoatAssistant
-        if getattr(self, '_goat', None) is not None:
-            self._goat.close()
-            self._goat.deleteLater()
+        if getattr(self, '_active_confirm', None) is not None or self._notify_queue:
+            return
         advice = None
         if getattr(self, '_fomc_new', 0):
             advice = ('Глава ФРС сделал заявление: есть непрочитанные заявления '
@@ -797,10 +889,8 @@ class TradeDiary(QtWidgets.QMainWindow):
                 mark_all_seen()
         if not advice:
             return
-        self._goat = GoatAssistant('', self, advice=advice,
-                                   auto_hide_ms=8000 if 'Quant alerts' in advice
-                                   else 5000)
-        self._goat.show()
+        self._show_goat(advice, confirm=False,
+                        auto_hide_ms=8000 if 'Quant alerts' in advice else 5000)
 
     def deleteClicked(self, row):
         if row < 0 or row >= len(self.data):
@@ -976,15 +1066,6 @@ class TradeDiary(QtWidgets.QMainWindow):
         """Open the watchlist dialog (tickers added from Qualitative Assessment)."""
         from watchlist_dialog import WatchlistDialog
         dlg = WatchlistDialog(self)
-        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
-        self._dialogs_set().add(dlg)
-        dlg.show()
-
-    def catalystClicked(self):
-        """Open the Catalyst dialog (Google-поиск катализаторов по тикеру)."""
-        from catalyst_dialog import CatalystDialog
-        dlg = CatalystDialog(self)
         dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
         self._dialogs_set().add(dlg)

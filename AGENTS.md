@@ -87,6 +87,10 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   номинальные доходности минус модельная ожидаемая инфляция, без ценовых шоков
   сырья и краткосрочной паники трейдеров. Это сигнальный таб Buy/Sell S&P по
   точкам перегиба; имеет `explainLabel` с пояснением.
+- **Катализатор** = событие, способное двинуть акцию (catalyst.py). У события
+  есть: дата (напоминание за сутки), оценка 0–5 по **отчётливости** (не по
+  благоприятности! направление — отдельное поле +/−/±), описание и **ожидание**
+  (какой исход/метрика будет позитивным/негативным сюрпризом).
 
 ## Карта модулей
 
@@ -112,10 +116,23 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
 - `candles_dialog.py`: свечной график по OHLC.
 - `correlation_dialog.py`: тепловая карта (seaborn).
 - `qualitative_dialog.py`: GoatAssistant (Clippy-аналог), опционально QtWebEngine.
-- `catalyst_dialog.py`: кнопка «Catalyst» в главном окне — встроенный браузер с
-  Google-поиском катализаторов по тикеру (как MOP, промт `CATALYST_PROMPT`
-  кодируется в URL < 2048) + оценка катализатора 0-5 (`StarRating`) в снапшот
-  watchlist (`catalyst`).
+- `catalyst.py` / `catalyst_dialog.py`: катализаторы по тикерам. `catalyst.py` —
+  чистое SQLite-хранилище `catalyst.db` (таблица `catalyst_events`: ticker, date,
+  score 0-5, direction +/−/±, description, expectation, notified) + `due_events(1)`/
+  `mark_notified` для напоминания «за сутки до даты» (и просроченные).
+  `catalyst_dialog.py` — менеджер событий тикера (тикер фиксирован, открывается
+  из Watchlist): таблица событий, `CatalystEventDialog` (календарь, звёзды,
+  ожидание). В watchlist есть таб «Events» (все события, Add/Edit/Delete) и
+  колонка Catalyst (живая суммарка из `catalyst.summary_for`, двойной клик —
+  редактировать).
+- **Напоминания катализаторов**: `_CatalystReminderThread` в main.py — на старте +
+  часовой QTimer (реальные `due_events`), плюс TEMP SIM: `sim_schedule_ticker`/
+  `sim_pending` в catalyst.py (первое событие через 30 мин, дальше каждые 7 мин,
+  30-сек QTimer). Катализатор-уведомления идут через очередь `_notify_queue` и
+  показываются **с красным крестиком подтверждения** (`GoatAssistant(ok_button=True)`,
+  сигнал `confirmed`): пользователь явно подтверждает прочтение, только потом
+  показывается следующее; пока есть активное/очередное подтверждение, обычные
+  уведомления Козы подавляются (`_show_advice_goat`). TEMP-код удалить после теста.
 - `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
 
