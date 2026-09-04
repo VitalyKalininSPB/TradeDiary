@@ -177,6 +177,8 @@ def _evaluate(c):
         'net_margin_yoy': c.get('netMarginYoyChangePp'),
         'forward_pe': c.get('forwardPE'),
         'eps_growth': c.get('forwardEPSGrowth'),
+        'trailing_pe': c.get('trailingPE'),
+        'trailing_eps_growth': c.get('trailingEPSGrowth'),
         'return_1m': c.get('return1mPct'), 'return_1y': c.get('return1yPct'),
         'benchmark_1m': c.get('benchmarkReturn1mPct'),
         'benchmark_1y': c.get('benchmarkReturn1yPct'),
@@ -185,6 +187,10 @@ def _evaluate(c):
         'valuation': None, 'growth_adj_valuation': None, 'rev_growth': None,
         'capital_efficiency': None,
         'sector_median_pe': None, 'sector_median_peg': None, 'peg': None,
+        'sector_median_trailing_pe': None,
+        'sector_median_trailing_eps_growth': None,
+        'sector_median_forward_eps_growth': None,
+        'pct_trailing_pe': None, 'pct_trailing_eps_growth': None,
         'revenue_growth': c.get('revenueGrowthPct'),
         'sector_median_rev_growth': None, 'pct_rev_growth': None,
         'roic': c.get('roicPct'), 'debt_equity': c.get('debtEquity'),
@@ -211,6 +217,13 @@ def _evaluate(c):
     if e['eps_growth'] is not None and not _finite(e['eps_growth']):
         e['warnings'].append('non_finite_eps_growth')
         e['eps_growth'] = None
+    if e['trailing_pe'] is not None and not _finite(e['trailing_pe']):
+        e['warnings'].append('non_finite_trailing_pe')
+        e['trailing_pe'] = None
+    if e['trailing_eps_growth'] is not None \
+            and not _finite(e['trailing_eps_growth']):
+        e['warnings'].append('non_finite_trailing_eps_growth')
+        e['trailing_eps_growth'] = None
     if e['revenue_growth'] is not None and not _finite(e['revenue_growth']):
         e['warnings'].append('non_finite_revenue_growth')
         e['revenue_growth'] = None
@@ -232,8 +245,13 @@ def _rank_sector(sector, companies):
     median = sorted(margins)[len(margins) // 2] if margins else None
     pes = [e['forward_pe'] for e in rankable if e['forward_pe']]
     median_pe = sorted(pes)[len(pes) // 2] if pes else None
+    tpes = [e['trailing_pe'] for e in rankable if e['trailing_pe']]
+    median_tpe = sorted(tpes)[len(tpes) // 2] if tpes else None
     epsg = [e['eps_growth'] for e in rankable if e['eps_growth'] is not None]
     median_epsg = sorted(epsg)[len(epsg) // 2] if epsg else None
+    tepsg = [e['trailing_eps_growth'] for e in rankable
+             if e['trailing_eps_growth'] is not None]
+    median_tepsg = sorted(tepsg)[len(tepsg) // 2] if tepsg else None
     pegs = []
     for e in rankable:
         peg = None
@@ -256,6 +274,9 @@ def _rank_sector(sector, companies):
         e['sector_median_margin'] = median
         e['sector_median_pe'] = median_pe
         e['sector_median_eps_growth'] = median_epsg
+        e['sector_median_forward_eps_growth'] = median_epsg
+        e['sector_median_trailing_pe'] = median_tpe
+        e['sector_median_trailing_eps_growth'] = median_tepsg
         e['sector_median_peg'] = median_peg
         e['sector_median_rev_growth'] = median_revg
         e['sector_median_roic'] = median_roic
@@ -308,11 +329,16 @@ def _rank_sector(sector, companies):
         e['label'] = _label(score)
     margin_vals = [e['net_margin'] for e in rankable]
     pe_vals = [e['forward_pe'] for e in rankable]
+    tpe_vals = [e['trailing_pe'] for e in rankable]
+    tepsg_vals = [e['trailing_eps_growth'] for e in rankable]
     mom1m_vals = [e['rel_momentum_1m'] for e in rankable]
     mom1y_vals = [e['rel_momentum_1y'] for e in rankable]
     for e in rankable:
         e['pct_margin'] = _percentile(e['net_margin'], margin_vals)
         e['pct_pe'] = _percentile(e['forward_pe'], pe_vals)
+        e['pct_trailing_pe'] = _percentile(e['trailing_pe'], tpe_vals)
+        e['pct_trailing_eps_growth'] = _percentile(
+            e['trailing_eps_growth'], tepsg_vals)
         e['pct_peg'] = _percentile(e['peg'], pegs)
         e['pct_rev_growth'] = _percentile(e['revenue_growth'], revg)
         e['pct_roic'] = _percentile(e['roic'], roics)

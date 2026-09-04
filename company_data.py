@@ -45,6 +45,10 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN roic REAL")
     if cols and 'debt_equity' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN debt_equity REAL")
+    if cols and 'trailing_pe' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN trailing_pe REAL")
+    if cols and 'trailing_eps_growth' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN trailing_eps_growth REAL")
     return conn
 
 
@@ -73,14 +77,20 @@ def fetch_company_metrics(ticker):
     """Живые метрики компании. None, если не хватает обязательных полей.
 
     Возвращает dict {net_margin, net_margin_yoy, return_1m, return_1y,
-    forward_pe, eps_growth, revenue_growth, roic, debt_equity}. Опциональны:
-    forward_pe, net_margin_yoy, eps_growth, revenue_growth, roic, debt_equity.
+    forward_pe, eps_growth (forward), trailing_pe, trailing_eps_growth,
+    revenue_growth, roic, debt_equity}. Опциональны: forward_pe,
+    eps_growth, trailing_pe, trailing_eps_growth, net_margin_yoy,
+    revenue_growth, roic, debt_equity.
     """
     sa = _stockanalysis_metrics(ticker)
     try:
         st = _stockanalysis_statistics(ticker)
     except Exception:  # noqa: BLE001 - optional fields must not break
         st = None
+    try:
+        fc = _stockanalysis_forecast(ticker)
+    except Exception:  # noqa: BLE001 - optional fields must not break
+        fc = None
     yh = _yahoo_returns(ticker)
     if not sa or not yh:
         return None
@@ -90,14 +100,20 @@ def fetch_company_metrics(ticker):
         return None
     return {'net_margin': net_margin, 'net_margin_yoy': yoy,
             'return_1m': ret_1m, 'return_1y': ret_1y,
-            'forward_pe': sa['forward_pe'], 'eps_growth': sa['eps_growth'],
+            'forward_pe': sa['forward_pe'],
+            'eps_growth': (fc or {}).get('forward_eps_growth'),
+            'trailing_pe': sa.get('trailing_pe'),
+            'trailing_eps_growth': sa.get('trailing_eps_growth'),
             'revenue_growth': sa['revenue_growth'],
             'roic': (st or {}).get('roic'),
             'debt_equity': (st or {}).get('debt_equity')}
 
 
 def _stockanalysis_metrics(ticker):
-    """Net margin TTM + YoY (pp) из SSR-блока summary:{...}."""
+    """Net margin TTM + YoY (pp) из SSR-блока summary:{...}.
+
+    Плюс trailing P/E (peRatio) и trailing EPS growth (epsGrowth — TTM YoY).
+    """
     r = requests.get('https://stockanalysis.com/stocks/{}/'.format(
         ticker.lower()), headers=_UA, timeout=25)
     r.raise_for_status()
@@ -132,15 +148,24 @@ def _stockanalysis_metrics(ticker):
                 forward_pe = pe
         except ValueError:
             forward_pe = None
-    eps_growth = None
+    trailing_pe = None
+    tpe_raw = _grab(r'peRatio:"([^"]+)"', block)
+    if tpe_raw:
+        try:
+            tpe = float(tpe_raw.replace(',', ''))
+            if tpe == tpe and tpe > 0:
+                trailing_pe = tpe
+        except ValueError:
+            trailing_pe = None
+    trailing_eps_growth = None
     eg_raw = _grab(r'epsGrowth:(-?[0-9.]+)', block)
     if eg_raw:
         try:
             eg = float(eg_raw)
             if eg == eg:
-                eps_growth = eg
+                trailing_eps_growth = eg
         except ValueError:
-            eps_growth = None
+            trailing_eps_growth = None
     revenue_growth = None
     rg_raw = _grab(r'revenueGrowth:(-?[0-9.]+)', block)
     if rg_raw:
@@ -151,8 +176,30 @@ def _stockanalysis_metrics(ticker):
         except ValueError:
             revenue_growth = None
     return {'net_margin': margin, 'net_margin_yoy': yoy,
-            'forward_pe': forward_pe, 'eps_growth': eps_growth,
+            'forward_pe': forward_pe, 'trailing_pe': trailing_pe,
+            'trailing_eps_growth': trailing_eps_growth,
             'revenue_growth': revenue_growth}
+
+
+def _stockanalysis_forecast(ticker):
+    """Forward EPS growth (консенсус, следующий фин. год) из forecast-страницы.
+
+    SSR-блок: estimates:{stats:{annual:{epsNext:{last:..,this:..,growth:..}}}}.
+    """
+    r = requests.get('https://stockanalysis.com/stocks/{}/forecast/'.format(
+        ticker.lower()), headers=_UA, timeout=25)
+    r.raise_for_status()
+    m = re.search(
+        r'epsNext:\{last:[0-9.]+,this:[0-9.]+,growth:(-?[0-9.]+)', r.text)
+    if not m:
+        return None
+    try:
+        g = float(m.group(1))
+    except ValueError:
+        return None
+    if not (g == g and g > -200.0):
+        return None
+    return {'forward_eps_growth': g}
 
 
 def _stat_value(html, stat_id):
@@ -225,20 +272,22 @@ def _metrics_cached(ticker):
         row = conn.execute(
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
             "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
-            "fetched_at FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
+            "trailing_pe, trailing_eps_growth, fetched_at "
+            "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[9])
+        fetched = datetime.datetime.fromisoformat(row[11])
     except ValueError:
         return None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
             'return_1m': row[2], 'return_1y': row[3],
             'forward_pe': row[4], 'eps_growth': row[5],
             'revenue_growth': row[6], 'roic': row[7],
-            'debt_equity': row[8], 'fetched_at': fetched}
+            'debt_equity': row[8], 'trailing_pe': row[9],
+            'trailing_eps_growth': row[10], 'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
@@ -248,13 +297,14 @@ def _save_metrics(ticker, sector, metrics):
             "INSERT OR REPLACE INTO company_metrics "
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
             "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
-            "debt_equity, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "debt_equity, trailing_pe, trailing_eps_growth, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
              metrics.get('revenue_growth'), metrics.get('roic'),
-             metrics.get('debt_equity'),
+             metrics.get('debt_equity'), metrics.get('trailing_pe'),
+             metrics.get('trailing_eps_growth'),
              datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
@@ -290,6 +340,8 @@ def _apply_metrics(c, m):
         c['return1yPct'] = m['return_1y']
         c['forwardPE'] = m.get('forward_pe')
         c['forwardEPSGrowth'] = m.get('eps_growth')
+        c['trailingPE'] = m.get('trailing_pe')
+        c['trailingEPSGrowth'] = m.get('trailing_eps_growth')
         c['revenueGrowthPct'] = m.get('revenue_growth')
         c['roicPct'] = m.get('roic')
         c['debtEquity'] = m.get('debt_equity')

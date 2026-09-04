@@ -3,6 +3,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import company_data
 import company_quant
+import markets
+import recommendation_panel
 
 _TXT = '#dcdce0'
 _LABEL_COLORS = {
@@ -28,7 +30,7 @@ _LABEL_SHORT_RU = {
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
             'Forward P/E', 'EPS growth %', 'PEG', 'Rev Growth %',
             'ROIC %', 'Debt/Equity', 'Rel Momentum 1M', 'Rel Momentum 1Y',
-            'Company Score', 'Research status']
+            'Company Score', 'Research status', 'Chart']
 
 # Коза для одной компании показывается не более 2 раз за запуск приложения
 # (иначе информационный перегруз). Счётчик в памяти — сбрасывается при рестарте.
@@ -79,6 +81,9 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         self.shortTable.itemClicked.connect(
             lambda item: self._on_company_clicked(self.shortTable, item))
         root.addWidget(self.tabs, 3)
+
+        self.recPanel = recommendation_panel.RecommendationPanel()
+        root.addWidget(self.recPanel)
 
         self.detail = QtWidgets.QTextBrowser()
         self.detail.setStyleSheet(
@@ -206,7 +211,9 @@ class CompanyScreenDialog(QtWidgets.QDialog):
         if s is None:
             self.detail.setPlainText('')
             self.qualButton.setEnabled(False)
+            self.recPanel.set_company(None)
             return
+        self.recPanel.set_company(s)
         label = s.get('label', company_quant.LABEL_INSUFFICIENT)
         title = (_LABEL_SHORT_RU if short else _LABEL_RU).get(label, label)
         company = s.get('company') or s.get('ticker') or ''
@@ -404,6 +411,11 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 elif c in (4, 10, 11, 12, 13):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
+            btn = QtWidgets.QPushButton('Chart')
+            btn.setFixedHeight(22)
+            ticker = s.get('ticker') or ''
+            btn.clicked.connect(lambda _=False, t=ticker: self._open_chart(t))
+            table.setCellWidget(r, len(_HEADERS) - 1, btn)
         table.resizeColumnsToContents()
 
     def _selected(self):
@@ -413,6 +425,24 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             item = table.item(row, 1)
             return item.text() if item else ''
         return ''
+
+    def _open_chart(self, ticker):
+        if not ticker:
+            return
+        from ma_chart_dialog import MAChartDialog
+        try:
+            _, currency = markets.market_currency(ticker)
+        except Exception:  # noqa: BLE001
+            currency = None
+        dlg = MAChartDialog(ticker, currency or markets.USD, '', '',
+                            self.window())
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        main = self.window()
+        if hasattr(main, '_dialogs_set'):
+            main._dialogs_set().add(dlg)
+            dlg.destroyed.connect(lambda obj=None, d=dlg:
+                                  main._dialogs_set().discard(d))
+        dlg.show()
 
     def _add_to_watchlist(self):
         ticker = self._selected()
