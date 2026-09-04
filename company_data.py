@@ -4,6 +4,7 @@
 Данные (кэш SQLite `sector_quant.db`, TTL 24ч — не чаще раза в день):
 - net margin (TTM) и YoY-изменение маржи — из SSR-блока `summary:{...}`
   страницы stockanalysis.com/stocks/{ticker}/ (netIncome/revenue + их YoY growth);
+- ROIC и Debt/Equity — из SSR-блока страницы .../statistics/;
 - доходности 1м/1г — из Yahoo chart API (range=1y), как в markets.py.
 
 Бенчмарк сектора (benchmarkReturn1m/1y) берётся из последнего sector-результата.
@@ -40,6 +41,10 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN eps_growth REAL")
     if cols and 'revenue_growth' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN revenue_growth REAL")
+    if cols and 'roic' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN roic REAL")
+    if cols and 'debt_equity' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN debt_equity REAL")
     return conn
 
 
@@ -68,9 +73,14 @@ def fetch_company_metrics(ticker):
     """Живые метрики компании. None, если не хватает обязательных полей.
 
     Возвращает dict {net_margin, net_margin_yoy, return_1m, return_1y,
-    forward_pe}. forward_pe и net_margin_yoy могут быть None (опционально).
+    forward_pe, eps_growth, revenue_growth, roic, debt_equity}. Опциональны:
+    forward_pe, net_margin_yoy, eps_growth, revenue_growth, roic, debt_equity.
     """
     sa = _stockanalysis_metrics(ticker)
+    try:
+        st = _stockanalysis_statistics(ticker)
+    except Exception:  # noqa: BLE001 - optional fields must not break
+        st = None
     yh = _yahoo_returns(ticker)
     if not sa or not yh:
         return None
@@ -81,7 +91,9 @@ def fetch_company_metrics(ticker):
     return {'net_margin': net_margin, 'net_margin_yoy': yoy,
             'return_1m': ret_1m, 'return_1y': ret_1y,
             'forward_pe': sa['forward_pe'], 'eps_growth': sa['eps_growth'],
-            'revenue_growth': sa['revenue_growth']}
+            'revenue_growth': sa['revenue_growth'],
+            'roic': (st or {}).get('roic'),
+            'debt_equity': (st or {}).get('debt_equity')}
 
 
 def _stockanalysis_metrics(ticker):
@@ -143,6 +155,33 @@ def _stockanalysis_metrics(ticker):
             'revenue_growth': revenue_growth}
 
 
+def _stat_value(html, stat_id):
+    """Числовое значение `{id:"<stat_id>",...,value:"N"}` из SSR statistics."""
+    m = re.search(r'id:"' + re.escape(stat_id) + r'"[^}]*?value:"([^"]+)"',
+                  html)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace('%', '').replace(',', ''))
+    except ValueError:
+        return None
+
+
+def _stockanalysis_statistics(ticker):
+    """ROIC (%, TTM) и Debt/Equity из SSR-блока statistics-страницы."""
+    r = requests.get('https://stockanalysis.com/stocks/{}/statistics/'.format(
+        ticker.lower()), headers=_UA, timeout=25)
+    r.raise_for_status()
+    html = r.text
+    roic = _stat_value(html, 'roic')
+    if roic is not None and not (roic == roic and roic > -100.0):
+        roic = None
+    debt_equity = _stat_value(html, 'debtEquity')
+    if debt_equity is not None and not (debt_equity >= 0.0):
+        debt_equity = None
+    return {'roic': roic, 'debt_equity': debt_equity}
+
+
 def _yahoo_returns(ticker):
     """(return_1m_pct, return_1y_pct) из дневного графика за 1 год."""
     for host in ('query1', 'query2'):
@@ -185,20 +224,21 @@ def _metrics_cached(ticker):
     try:
         row = conn.execute(
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
-            "forward_pe, eps_growth, revenue_growth, fetched_at "
-            "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
+            "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
+            "fetched_at FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[7])
+        fetched = datetime.datetime.fromisoformat(row[9])
     except ValueError:
         return None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
             'return_1m': row[2], 'return_1y': row[3],
             'forward_pe': row[4], 'eps_growth': row[5],
-            'revenue_growth': row[6], 'fetched_at': fetched}
+            'revenue_growth': row[6], 'roic': row[7],
+            'debt_equity': row[8], 'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
@@ -207,12 +247,14 @@ def _save_metrics(ticker, sector, metrics):
         conn.execute(
             "INSERT OR REPLACE INTO company_metrics "
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
-            "return_1y, forward_pe, eps_growth, revenue_growth, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
+            "debt_equity, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
-             metrics.get('revenue_growth'),
+             metrics.get('revenue_growth'), metrics.get('roic'),
+             metrics.get('debt_equity'),
              datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
@@ -249,6 +291,8 @@ def _apply_metrics(c, m):
         c['forwardPE'] = m.get('forward_pe')
         c['forwardEPSGrowth'] = m.get('eps_growth')
         c['revenueGrowthPct'] = m.get('revenue_growth')
+        c['roicPct'] = m.get('roic')
+        c['debtEquity'] = m.get('debt_equity')
     return c
 
 

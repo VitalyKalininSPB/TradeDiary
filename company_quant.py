@@ -7,7 +7,7 @@ data providers, без прогнозов доходности. Только н�
 Вход — CompanyQuantInput (dict):
   ticker, companyName, sector, netMarginPct?, netMarginYoyChangePp?,
   return1mPct?, return1yPct?, benchmarkReturn1mPct?, benchmarkReturn1yPct?,
-  forwardPE?, forwardEPSGrowth?, revenueGrowthPct?.
+  forwardPE?, forwardEPSGrowth?, revenueGrowthPct?, roicPct?, debtEquity?.
 
 Для ranking обязательны ticker, companyName, sector, netMarginPct, return1mPct,
 return1yPct, benchmarkReturn1mPct, benchmarkReturn1yPct. Отсутствующие значения
@@ -23,10 +23,12 @@ return1yPct, benchmarkReturn1mPct, benchmarkReturn1yPct. Отсутствующ�
   peg        = forwardPE / forwardEPSGrowth      # только при eps growth > 0
   growthAdjValuation = -tanh(relPEG / 0.5)       # если peg есть
   revenueGrowth = tanh(relRevenueGrowth / 15)    # если revenueGrowthPct есть
+  capitalEfficiency = tanh(relROIC / 10)        # если roicPct есть
   companyScore = (5·rp + 3·momentum + 2·marginTrend + 2·valuation
-                  + 2·growthAdjValuation + 2·revenueGrowth) /
-                 (сумма доступных весов)
-                 # без valuation/trend/peg/revgrowth совпадает с исходной
+                  + 2·growthAdjValuation + 2·revenueGrowth
+                  + 2·capitalEfficiency) / (сумма доступных весов)
+                 # без опциональных компонент совпадает с исходной
+  # debtEquity в score не входит — только флаг/колонка (риск долга).
 """
 import math
 
@@ -50,12 +52,17 @@ W_TREND = 2
 W_VAL = 2
 W_PEG = 2
 W_REV = 2
+W_ROIC = 2
 
 SCORE_RESEARCH = 0.35
 SCORE_LOW = -0.20
 SCALE_VAL = 40.0
 SCALE_PEG = 0.5
 SCALE_REV = 15.0
+SCALE_ROIC = 10.0
+
+# Финансовый сектор: леверидж — бизнес-модель, Debt/Equity-флаг не показываем.
+_DEBT_NOFLAG_SECTORS = {'Financials'}
 
 
 def _finite(v):
@@ -117,6 +124,11 @@ def _flags(e):
             and e.get('rel_momentum_1y') is not None
             and e['rel_momentum_1y'] < 0):
         out.append('Дорогой и слабый: высокая оценка при отрицательном momentum')
+    pct_debt = e.get('pct_debt')
+    if (pct_debt is not None and pct_debt > 70
+            and e.get('sector') not in _DEBT_NOFLAG_SECTORS):
+        out.append('Долг высокий: Debt/Equity {:.2f} — выше {:.0f}% сектора'
+                   .format(e.get('debt_equity'), pct_debt))
     return out
 
 
@@ -132,6 +144,9 @@ def _contribs(e):
         parts.append(('Оценка по росту (PEG)', W_PEG, e['growth_adj_valuation']))
     if e.get('rev_growth') is not None:
         parts.append(('Рост выручки', W_REV, e['rev_growth']))
+    if e.get('capital_efficiency') is not None:
+        parts.append(('Эффективность капитала (ROIC)', W_ROIC,
+                      e['capital_efficiency']))
     used = sum(w for _n, w, _v in parts)
     if not used:
         return []
@@ -168,9 +183,13 @@ def _evaluate(c):
         'warnings': [], 'label': LABEL_INSUFFICIENT,
         'relative_profitability': None, 'momentum': None, 'margin_trend': None,
         'valuation': None, 'growth_adj_valuation': None, 'rev_growth': None,
+        'capital_efficiency': None,
         'sector_median_pe': None, 'sector_median_peg': None, 'peg': None,
         'revenue_growth': c.get('revenueGrowthPct'),
         'sector_median_rev_growth': None, 'pct_rev_growth': None,
+        'roic': c.get('roicPct'), 'debt_equity': c.get('debtEquity'),
+        'sector_median_roic': None, 'pct_roic': None,
+        'sector_median_debt': None, 'pct_debt': None,
         'company_score': None, 'score_rounded': None, 'rank': None,
     }
     missing = [f for f in REQUIRED_FIELDS
@@ -195,6 +214,12 @@ def _evaluate(c):
     if e['revenue_growth'] is not None and not _finite(e['revenue_growth']):
         e['warnings'].append('non_finite_revenue_growth')
         e['revenue_growth'] = None
+    if e['roic'] is not None and not _finite(e['roic']):
+        e['warnings'].append('non_finite_roic')
+        e['roic'] = None
+    if e['debt_equity'] is not None and not _finite(e['debt_equity']):
+        e['warnings'].append('non_finite_debt_equity')
+        e['debt_equity'] = None
     e['_rankable'] = True
     return e
 
@@ -222,12 +247,19 @@ def _rank_sector(sector, companies):
     revg = [e['revenue_growth'] for e in rankable
             if e['revenue_growth'] is not None]
     median_revg = sorted(revg)[len(revg) // 2] if revg else None
+    roics = [e['roic'] for e in rankable if e['roic'] is not None]
+    median_roic = sorted(roics)[len(roics) // 2] if roics else None
+    debts = [e['debt_equity'] for e in rankable
+             if e['debt_equity'] is not None]
+    median_debt = sorted(debts)[len(debts) // 2] if debts else None
     for e in rankable:
         e['sector_median_margin'] = median
         e['sector_median_pe'] = median_pe
         e['sector_median_eps_growth'] = median_epsg
         e['sector_median_peg'] = median_peg
         e['sector_median_rev_growth'] = median_revg
+        e['sector_median_roic'] = median_roic
+        e['sector_median_debt'] = median_debt
         rp = math.tanh((e['net_margin'] - avg) / 10.0)
         rel1m = e['return_1m'] - e['benchmark_1m']
         rel1y = e['return_1y'] - e['benchmark_1y']
@@ -246,6 +278,9 @@ def _rank_sector(sector, companies):
         if e['revenue_growth'] is not None and median_revg is not None:
             rev_growth = math.tanh(
                 (e['revenue_growth'] - median_revg) / SCALE_REV)
+        capital_eff = None
+        if e['roic'] is not None and median_roic is not None:
+            capital_eff = math.tanh((e['roic'] - median_roic) / SCALE_ROIC)
         parts = [(W_RP, rp), (W_MOM, momentum)]
         if trend is not None:
             parts.append((W_TREND, trend))
@@ -255,6 +290,8 @@ def _rank_sector(sector, companies):
             parts.append((W_PEG, growth_val))
         if rev_growth is not None:
             parts.append((W_REV, rev_growth))
+        if capital_eff is not None:
+            parts.append((W_ROIC, capital_eff))
         used = sum(w for w, _ in parts)
         score = sum(w * c for w, c in parts) / used if used else None
         e['relative_profitability'] = rp
@@ -265,6 +302,7 @@ def _rank_sector(sector, companies):
         e['valuation'] = valuation
         e['growth_adj_valuation'] = growth_val
         e['rev_growth'] = rev_growth
+        e['capital_efficiency'] = capital_eff
         e['company_score'] = score
         e['score_rounded'] = round(score, 2) if score is not None else None
         e['label'] = _label(score)
@@ -277,6 +315,8 @@ def _rank_sector(sector, companies):
         e['pct_pe'] = _percentile(e['forward_pe'], pe_vals)
         e['pct_peg'] = _percentile(e['peg'], pegs)
         e['pct_rev_growth'] = _percentile(e['revenue_growth'], revg)
+        e['pct_roic'] = _percentile(e['roic'], roics)
+        e['pct_debt'] = _percentile(e['debt_equity'], debts)
         e['pct_mom_1m'] = _percentile(e['rel_momentum_1m'], mom1m_vals)
         e['pct_mom_1y'] = _percentile(e['rel_momentum_1y'], mom1y_vals)
         e['flags'] = _flags(e)

@@ -27,8 +27,8 @@ _LABEL_SHORT_RU = {
 
 _HEADERS = ['Rank', 'Ticker', 'Company', 'Net Margin', 'Net Margin YoY',
             'Forward P/E', 'EPS growth %', 'PEG', 'Rev Growth %',
-            'Rel Momentum 1M', 'Rel Momentum 1Y', 'Company Score',
-            'Research status']
+            'ROIC %', 'Debt/Equity', 'Rel Momentum 1M', 'Rel Momentum 1Y',
+            'Company Score', 'Research status']
 
 # Коза для одной компании показывается не более 2 раз за запуск приложения
 # (иначе информационный перегруз). Счётчик в памяти — сбрасывается при рестарте.
@@ -262,6 +262,24 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             lines.append('• Revenue Growth (YoY): {:+.1f}%'.format(revg))
         else:
             lines.append('• Revenue Growth (YoY): -')
+        roic = s.get('roic')
+        pct_roic = s.get('pct_roic')
+        if roic is not None and pct_roic is not None:
+            lines.append('• ROIC: {:+.1f}% — выше {:.0f}% компаний '
+                         '{}'.format(roic, pct_roic, self._sector))
+        elif roic is not None:
+            lines.append('• ROIC: {:+.1f}%'.format(roic))
+        else:
+            lines.append('• ROIC: -')
+        de = s.get('debt_equity')
+        pct_debt = s.get('pct_debt')
+        if de is not None and pct_debt is not None:
+            lines.append('• Debt/Equity: {:.2f} — выше {:.0f}% компаний '
+                         '{}'.format(de, pct_debt, self._sector))
+        elif de is not None:
+            lines.append('• Debt/Equity: {:.2f}'.format(de))
+        else:
+            lines.append('• Debt/Equity: -')
         score = s.get('score_rounded')
         lines.append('• Company Score: {:+.2f}'.format(score)
                      if score is not None else '• Company Score: -')
@@ -342,6 +360,8 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 self._fmt(s.get('eps_growth'), '%'),
                 self._peg(s.get('peg')),
                 self._fmt(s.get('revenue_growth'), '%'),
+                self._fmt(s.get('roic'), '%'),
+                self._ratio(s.get('debt_equity')),
                 self._fmt(s.get('rel_momentum_1m'), '%'),
                 self._fmt(s.get('rel_momentum_1y'), '%'),
                 self._fmt(s.get('score_rounded')),
@@ -349,7 +369,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             ]
             for c, v in enumerate(vals):
                 item = QtWidgets.QTableWidgetItem(str(v))
-                if c == 12:
+                if c == 14:
                     color = _LABEL_COLORS.get(label, _LABEL_COLORS[
                         company_quant.LABEL_INSUFFICIENT])
                     item.setBackground(QtGui.QColor(color))
@@ -377,7 +397,11 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                         s.get('revenue_growth'),
                         s.get('sector_median_rev_growth'),
                         lower_better=False))
-                elif c in (4, 9, 10, 11):
+                elif c == 9:
+                    item.setForeground(self._color_vs(
+                        s.get('roic'), s.get('sector_median_roic'),
+                        lower_better=False))
+                elif c in (4, 10, 11, 12, 13):
                     item.setForeground(QtGui.QColor(_TXT))
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
@@ -396,7 +420,7 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             return
         table = self.tabs.currentWidget()
         row = table.currentRow()
-        score_item = table.item(row, 11)
+        score_item = table.item(row, 13)
         quant = None
         if score_item and score_item.text() != '-':
             try:
@@ -436,6 +460,12 @@ class CompanyScreenDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _peg(value):
+        if value is None:
+            return '-'
+        return '{:.2f}'.format(value)
+
+    @staticmethod
+    def _ratio(value):
         if value is None:
             return '-'
         return '{:.2f}'.format(value)
