@@ -57,9 +57,6 @@ INDICATORS = [
     ('FEDFUNDS', 'Fed Funds Rate (FEDFUNDS)', 'Federal funds effective rate',
                  'Percent',                '#ef9a9a',
                  'Ключевая ставка ФРС, стоимость денег'),
-    ('PAYEMS',   'Non-Farm Payrolls (PAYEMS)', 'Total non-farm employment',
-                 'Thousands of persons',   '#a5d6a7',
-                 'Число рабочих мест вне сельского хозяйства'),
     ('UMCSENT',  'Michigan Consumer Sentiment (UMCSENT)',
                  'Michigan consumer sentiment index',
                  'Index (1966Q1 = 100)',   '#ce93d8',
@@ -613,6 +610,9 @@ def _gdp_phase(dates, values):
 _LATE_GDPI = 'GPDI'   # Real Gross Private Domestic Investment (chained bn$)
 _LATE_CC = 'CCSA'     # Real Consumer Credit Outstanding (chained bn$)
 
+# Labor-force participation rate, cross-checked by the Unemployment-tab goat.
+_CIVPART_ID = 'CIVPART'
+
 
 def _late_cycle(values_gdpi, dates_gdpi, values_cc, dates_cc):
     """True when GPDI is falling over the last ~3m while consumer credit holds."""
@@ -1154,6 +1154,148 @@ class _IndicatorTab(QWidget):
 
         return ''
 
+    def cpi_advice(self):
+        """Goat text for the CPI tab, or ''.
+
+        Headline CPI YoY drives the discount rate, so inflation moves market
+        multiples: hot inflation compresses P/E (long-duration NASDAQ first),
+        disinflation lets P/E expand, deflation hits earnings instead.
+        Regimes on YoY growth g and its 3-month acceleration accel.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        if v != v:  # NaN
+            return ''
+        vy = _at_days_ago(self._dates, self._values, _YOY_DAYS)
+        vp = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        vyp = _at_days_ago(self._dates, self._values,
+                           _YOY_DAYS + _MOMENTUM_DAYS)
+        if not all((vy, vp, vyp)) or 0 in (vy, vp, vyp):
+            return ''
+        g = (v / vy - 1.0) * 100.0
+        accel = g - (vp / vyp - 1.0) * 100.0
+
+        if g >= 4.0:
+            if accel < -2.0:
+                return ('Инфляция высокая, но падает — давление на ставки '
+                        'ослабевает. P/E может расширяться: акции дорожают, '
+                        'особенно NASDAQ.')
+            return ('Инфляция разгоняется — ставки будут расти, акции '
+                    'дешевеют. Сильнее всех страдают Tech и NASDAQ (долгие '
+                    'деньги). Осторожнее с покупками S&P.')
+        if g < 0.0:
+            return ('Дефляция — цены падают: прибыли компаний сжимаются, '
+                    'рынку плохо.')
+        if 1.5 <= g <= 2.5:
+            if accel > 2.0:
+                return ('Инфляция около цели, но оживает — лёгкое давление '
+                        'на акции.')
+            if accel < -2.0:
+                return ('Инфляция около цели и затухает — лёгкая поддержка '
+                        'для акций и P/E.')
+            return ('Инфляция у цели (~2%) — нейтрально для акций: ставки и '
+                    'P/E в норме.')
+        if accel > 2.0:
+            return ('Инфляция оживает — лёгкое давление на акции.')
+        if accel < -2.0:
+            return ('Инфляция затухает — лёгкая поддержка для акций и P/E.')
+        return ('Инфляция около цели, без резких движений — для рынка '
+                'нейтрально.')
+
+    def unrate_advice(self, participation=None):
+        """Goat text for the Unemployment tab, or ''.
+
+        Reads the UNRATE level and its 3-month move d, cross-checked against
+        labor-force participation (a (dates, values) pair or None when
+        unavailable): a rate rise driven by people re-entering the workforce
+        is softer than one driven by layoffs.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        if v != v:  # NaN
+            return ''
+        mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        if mo is None or mo != mo:
+            return ''
+        d = v - mo
+
+        def _mom(series):
+            if not series:
+                return None
+            dates, values = series
+            if not values:
+                return None
+            p = _at_days_ago(dates, values, _MOMENTUM_DAYS)
+            if p is None or p != p:
+                return None
+            return values[-1] - p
+
+        part_d = _mom(participation)
+        part_rising = part_d is not None and part_d > 0.0
+
+        if v < 4.0 and abs(d) < 0.2:
+            return ('Безработица низкая и стабильная — рынок труда крепкий, '
+                    'потребитель держится. Держи long, но следи за ростом '
+                    'зарплат и упрямой инфляцией.')
+        if d >= 0.5:
+            return ('Безработица резко растёт — риск рецессии, удар по '
+                    'прибылям и долгам. Выходи из long, можно short '
+                    'S&P/цикликов.')
+        if d >= 0.2:
+            if part_rising:
+                return ('Безработица растёт из-за возврата людей, а не '
+                        'увольнений — сигнал мягче. Long можно держать, но '
+                        'аккуратно.')
+            return ('Безработица медленно ползёт вверх — наём остывает. '
+                    'Новые long открывай только выборочно: не в циклики '
+                    '(магазины, авто, стройка) — им больно уже сейчас; '
+                    'существующие держи. Когда ФРС начнёт снижать ставки, '
+                    'выиграют спокойные отрасли (продукты, коммуналка, '
+                    'медицина) и технологичные лидеры.')
+        if d <= -0.2:
+            return ('Безработица падает — наём сильный, прибыли растут. '
+                    'Держи long в цикликах, но крепкий рынок труда может '
+                    'вернуть инфляцию и ставки.')
+        return ('Безработица в норме, без резких движений — для рынка '
+                'нейтрально.')
+
+    def fedfunds_advice(self):
+        """Goat text for the Fed Funds Rate tab, or ''.
+
+        The policy rate is the direct lever on discount rates, so it moves
+        multiples: hikes compress P/E (long-duration first), cuts let P/E
+        expand. Momentum beats level — a shift in direction signals the change
+        in pressure before the level itself matters.
+        """
+        if not self._values or not self._dates:
+            return ''
+        v = self._values[-1]
+        if v != v:  # NaN
+            return ''
+        mo = _at_days_ago(self._dates, self._values, _MOMENTUM_DAYS)
+        if mo is None or mo != mo:
+            return ''
+        d = v - mo
+
+        if d >= 0.25:
+            return ('ФРС поднимает ставку — деньги дорожают, P/E сжимается. '
+                    'Сократи long в Tech/NASDAQ; новые — выборочно.')
+        if d <= -0.25:
+            return ('ФРС снижает ставку — деньги дешевеют, P/E может '
+                    'расширяться: плюс для рынка. Но если снижение из-за '
+                    'слабой экономики — прибыли могут падать, держи защиту.')
+        if v < 1.0:
+            return ('Ставка почти нулевая — дешёвые деньги, попутный ветер '
+                    'для рынка. Держи long; риск — разгон инфляции.')
+        if v >= 5.0:
+            return ('Ставка высокая и стабильная — дорогой капитал давит на '
+                    'buybacks и P/E. Держи защиту, новые long открывай '
+                    'аккуратно.')
+        return ('Ставка в норме и стабильна — нейтрально для рынка, P/E без '
+                'давления.')
+
     def permits_advice(self):
         """Goat text for the Building Permits tab, or ''.
 
@@ -1527,6 +1669,9 @@ class MacroDialog(QDialog):
         self._widgets = []
         self._gdp_tab = None
         self._permits_tab = None
+        self._cpi_tab = None
+        self._unrate_tab = None
+        self._fedfunds_tab = None
         self._nfib_tab = None
         self._ism_tab = None
         self._ism_services_tab = None
@@ -1635,6 +1780,12 @@ class MacroDialog(QDialog):
                                 self)
             if series_id == 'PERMIT':
                 self._permits_tab = tab
+            elif series_id == 'CPIAUCSL':
+                self._cpi_tab = tab
+            elif series_id == 'UNRATE':
+                self._unrate_tab = tab
+            elif series_id == 'FEDFUNDS':
+                self._fedfunds_tab = tab
             elif series_id == 'UMCSENT':
                 tab._hlines = [55, 70, 80]
                 self._sentiment_tab = tab
@@ -1737,6 +1888,9 @@ class MacroDialog(QDialog):
     def _on_row_loaded(self, series_id, dates, values, note):
         if series_id in (_LATE_GDPI, _LATE_CC):
             self._late_data[series_id] = (dates, values)
+            return
+        if series_id == _CIVPART_ID:
+            self._late_data[_CIVPART_ID] = (dates, values)
             return
         if series_id == 'NTFS':
             self._yield_tab.set_ntfs(dates, values)
@@ -1876,6 +2030,13 @@ class MacroDialog(QDialog):
                           '(Utilities, Consumer Staples, Healthcare).')
         elif widget is self._permits_tab:
             advice = widget.permits_advice()
+        elif widget is self._cpi_tab:
+            advice = widget.cpi_advice()
+        elif widget is self._unrate_tab:
+            advice = widget.unrate_advice(
+                self._late_data.get(_CIVPART_ID))
+        elif widget is self._fedfunds_tab:
+            advice = widget.fedfunds_advice()
         elif widget is self._nfib_tab:
             advice = widget.nfib_advice()
         elif widget is self._sentiment_tab:
@@ -1909,6 +2070,7 @@ class MacroDialog(QDialog):
         items.append(('NTFS', _load_ntfs))
         items.append((_LATE_GDPI, _fred))
         items.append((_LATE_CC, _fred))
+        items.append((_CIVPART_ID, _fred))
         self._loader = _ChartLoaderThread(items, self)
         self._loader.row_loaded.connect(self._on_row_loaded)
         self._loader.load_done.connect(self._on_load_done)
