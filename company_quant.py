@@ -19,9 +19,11 @@ return1yPct, benchmarkReturn1mPct, benchmarkReturn1yPct. Отсутствующ�
   momentum = tanh((relativeMomentum1mPct + relativeMomentum1yPct) / 100)
   marginTrend = tanh(netMarginYoyChangePp / 5)   # если поле есть, иначе null
   valuation  = -tanh(relForwardPE / 40)          # если forwardPE есть
-  companyScore = (5·rp + 3·momentum + 2·marginTrend + 2·valuation) /
-                 (сумма доступных весов)
-                 # без valuation и trend совпадает с исходной формулой
+  peg        = forwardPE / forwardEPSGrowth      # только при eps growth > 0
+  growthAdjValuation = -tanh(relPEG / 0.5)       # если peg есть
+  companyScore = (5·rp + 3·momentum + 2·marginTrend + 2·valuation
+                  + 2·growthAdjValuation) / (сумма доступных весов)
+                 # без valuation/trend/peg совпадает с исходной формулой
 """
 import math
 
@@ -43,10 +45,12 @@ W_RP = 5
 W_MOM = 3
 W_TREND = 2
 W_VAL = 2
+W_PEG = 2
 
 SCORE_RESEARCH = 0.35
 SCORE_LOW = -0.20
 SCALE_VAL = 40.0
+SCALE_PEG = 0.5
 
 
 def _finite(v):
@@ -83,6 +87,17 @@ def _flags(e):
     if pct_pe is not None and pct_pe > 70:
         out.append('Оценка выше большинства компаний сектора '
                    '(Forward P/E {:.1f}×)'.format(e.get('forward_pe')))
+    epsg = e.get('eps_growth')
+    if epsg is not None and epsg < 0:
+        out.append('EPS growth отрицательный ({:+.1f}%) — PEG неприменим'
+                   .format(epsg))
+    pct_peg = e.get('pct_peg')
+    if pct_peg is not None and pct_peg > 70:
+        out.append('Оценка с поправкой на рост выше большинства компаний '
+                   'сектора (PEG {:.2f})'.format(e.get('peg')))
+    if (pct_pe is not None and pct_pe > 60
+            and epsg is not None and epsg < 0):
+        out.append('Дорогой без роста: высокая оценка при падающем EPS')
     if (yoy is not None and yoy > 0
             and e.get('rel_momentum_1m') is not None
             and e['rel_momentum_1m'] < 0):
@@ -105,6 +120,8 @@ def _contribs(e):
         parts.append(('Тренд маржи', W_TREND, e['margin_trend']))
     if e.get('valuation') is not None:
         parts.append(('Оценка', W_VAL, e['valuation']))
+    if e.get('growth_adj_valuation') is not None:
+        parts.append(('Оценка по росту (PEG)', W_PEG, e['growth_adj_valuation']))
     used = sum(w for _n, w, _v in parts)
     if not used:
         return []
@@ -140,7 +157,8 @@ def _evaluate(c):
         'benchmark_1y': c.get('benchmarkReturn1yPct'),
         'warnings': [], 'label': LABEL_INSUFFICIENT,
         'relative_profitability': None, 'momentum': None, 'margin_trend': None,
-        'valuation': None, 'sector_median_pe': None,
+        'valuation': None, 'growth_adj_valuation': None,
+        'sector_median_pe': None, 'sector_median_peg': None, 'peg': None,
         'company_score': None, 'score_rounded': None, 'rank': None,
     }
     missing = [f for f in REQUIRED_FIELDS
@@ -159,6 +177,9 @@ def _evaluate(c):
     if e['forward_pe'] is not None and not _finite(e['forward_pe']):
         e['warnings'].append('non_finite_forward_pe')
         e['forward_pe'] = None
+    if e['eps_growth'] is not None and not _finite(e['eps_growth']):
+        e['warnings'].append('non_finite_eps_growth')
+        e['eps_growth'] = None
     e['_rankable'] = True
     return e
 
@@ -173,10 +194,21 @@ def _rank_sector(sector, companies):
     median_pe = sorted(pes)[len(pes) // 2] if pes else None
     epsg = [e['eps_growth'] for e in rankable if e['eps_growth'] is not None]
     median_epsg = sorted(epsg)[len(epsg) // 2] if epsg else None
+    pegs = []
+    for e in rankable:
+        peg = None
+        if e['forward_pe'] is not None and e['eps_growth'] is not None \
+                and e['eps_growth'] > 0:
+            peg = e['forward_pe'] / e['eps_growth']
+        e['peg'] = peg
+        if peg is not None:
+            pegs.append(peg)
+    median_peg = sorted(pegs)[len(pegs) // 2] if pegs else None
     for e in rankable:
         e['sector_median_margin'] = median
         e['sector_median_pe'] = median_pe
         e['sector_median_eps_growth'] = median_epsg
+        e['sector_median_peg'] = median_peg
         rp = math.tanh((e['net_margin'] - avg) / 10.0)
         rel1m = e['return_1m'] - e['benchmark_1m']
         rel1y = e['return_1y'] - e['benchmark_1y']
@@ -187,11 +219,17 @@ def _rank_sector(sector, companies):
         if e['forward_pe'] is not None and median_pe:
             rel_pe = (e['forward_pe'] - median_pe) / median_pe
             valuation = -math.tanh(rel_pe / SCALE_VAL)
+        growth_val = None
+        if e['peg'] is not None and median_peg:
+            rel_peg = (e['peg'] - median_peg) / median_peg
+            growth_val = -math.tanh(rel_peg / SCALE_PEG)
         parts = [(W_RP, rp), (W_MOM, momentum)]
         if trend is not None:
             parts.append((W_TREND, trend))
         if valuation is not None:
             parts.append((W_VAL, valuation))
+        if growth_val is not None:
+            parts.append((W_PEG, growth_val))
         used = sum(w for w, _ in parts)
         score = sum(w * c for w, c in parts) / used if used else None
         e['relative_profitability'] = rp
@@ -200,6 +238,7 @@ def _rank_sector(sector, companies):
         e['momentum'] = momentum
         e['margin_trend'] = trend
         e['valuation'] = valuation
+        e['growth_adj_valuation'] = growth_val
         e['company_score'] = score
         e['score_rounded'] = round(score, 2) if score is not None else None
         e['label'] = _label(score)
@@ -210,6 +249,7 @@ def _rank_sector(sector, companies):
     for e in rankable:
         e['pct_margin'] = _percentile(e['net_margin'], margin_vals)
         e['pct_pe'] = _percentile(e['forward_pe'], pe_vals)
+        e['pct_peg'] = _percentile(e['peg'], pegs)
         e['pct_mom_1m'] = _percentile(e['rel_momentum_1m'], mom1m_vals)
         e['pct_mom_1y'] = _percentile(e['rel_momentum_1y'], mom1y_vals)
         e['flags'] = _flags(e)
