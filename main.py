@@ -19,6 +19,7 @@ from persistence import load as load_diary, save as save_diary
 import risk
 import markets
 import price_history
+import simple_mode_settings
 
 log = logging.getLogger(__name__)
 
@@ -297,6 +298,14 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.tradeTableView.setColumnWidth(12, 70)
         self.tradeTableView.setColumnWidth(13, 80)
         self.tradeTableView.setColumnWidth(14, 70)
+        self.simpleModeButton.toggled.connect(
+            simple_mode_settings.set_simple_enabled)
+        simple_mode_settings.simple_changed().connect(
+            self._on_simple_mode_changed)
+
+    def _on_simple_mode_changed(self, on):
+        """Синхронизировать тумблер, если режим поменяли вне главного окна."""
+        self.simpleModeButton.setChecked(on)
 
     def _rebuildChartButtons(self):
         for w in self._chartButtons:
@@ -707,6 +716,20 @@ class TradeDiary(QtWidgets.QMainWindow):
                   self.dealHistoryButton, self.updatePricesButton):
             top.addWidget(w)
         top.addStretch(1)
+
+        self.simpleModeButton = QtWidgets.QPushButton('⚡ Simple Mode')
+        self.simpleModeButton.setCheckable(True)
+        self.simpleModeButton.setChecked(
+            simple_mode_settings.is_simple_enabled())
+        self.simpleModeButton.setToolTip(
+            'Simple Mode: краткая карточка тикера (вердикт, 3 факта, '
+            'качество данных). Выкл. — полный анализ '
+            '(P/E, EPS growth, Динамика, Short).')
+        self.simpleModeButton.setStyleSheet(
+            'QPushButton { font-weight: bold; padding: 3px 12px; }'
+            'QPushButton:checked { background-color: #1f6f3f;'
+            ' color: #ffffff; border: 1px solid #2e7d32; }')
+        top.addWidget(self.simpleModeButton)
 
         bottom = QtWidgets.QVBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)

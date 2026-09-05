@@ -92,6 +92,41 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   благоприятности! направление — отдельное поле +/−/±), описание и **ожидание**
   (какой исход/метрика будет позитивным/негативным сюрпризом).
 
+## Simple Mode карточки тикера
+
+**Продукт-решение:** ближайший месяц отлаживаем ТОЛЬКО Simple Mode. Full
+Analysis и остальные экраны не развиваем, не перегружаем простую карточку.
+
+- Simple Mode = краткая карточка тикера, отвечает ровно на 3 вопроса:
+  1) есть ли преимущество относительно peers;
+  2) насколько надёжны данные;
+  3) что делать дальше.
+- Вердикты: **Candidate** / **Watchlist** / **Skip** / **Нет данных**.
+  Это эвристики v1, а не «истинная стоимость» (пороги — константы в
+  `simple_mode.py`): `rel_eps >= +5` п.п. (преимущество) / `<= -5` п.п. (Skip);
+  дороговизна = `pct_pe > 70` ИЛИ `forward_pe >= 1.30 × медианы сектора` (OR);
+  дешевизна = `pct_pe < 30` ИЛИ `forward_pe <= 0.77 × медианы` — НЕ повышает
+  вердикт без подтверждения (защита от value trap).
+- **Candidate** требует подтверждающий слой (сюрпризы по отчётам / тренд
+  маржи YoY / ревизии trailing→forward P/E). Без него — Watchlist даже при
+  сильном rel_eps (пример CRC: rel_eps +20.5 п.п., но 0 слоёв → Watchlist).
+- Карточка использует ТОЛЬКО реально присутствующие поля строки `e`
+  (сокращённый row ручного анализа тикера не содержит `net_margin`, `roic`,
+  `debt_equity`, `company_score`, `label`, `rank`, `flags`, `contribs`,
+  `relative_profitability`, `momentum`). Полный скор/ранг не имитируется.
+- Катализатор: `catalyst.summary_for(ticker)`; 0 событий → «Катализатор: не
+  обнаружен системой» (НЕ «нет катализатора»). Число событий и ближайшая
+  дата показываются строкой.
+- Earnings: только честные даты. Прошедшую дату — «Последний отчёт: … N дн.
+  назад»; будущую — «Следующий отчёт: … · до отчёта: N дн.». Дату «~+90 дней»
+  НЕ генерируем; нет даты → «ожидается по календарю».
+- Реализация: `simple_mode.py` (чистая математика, без Qt) +
+  `simple_mode_settings.py` (QSettings-синглтон с сигналом `changed(bool)`),
+  виджет `SimpleModePanel` в `recommendation_panel.py`. Режим глобальный:
+  тумблер `⚡ Simple Mode` в правом верхнем углу главного окна (main.py),
+  применяется ко всей карточке тикера (RecommendationDialog и
+  RecommendationPanel), запоминается между запусками.
+
 ## Карта модулей
 
 - `main.py` (1080+ строк): `TradeDiary(QMainWindow)` — главное окно; `TableModel`
@@ -134,6 +169,12 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   уведомления Козы подавляются (`_show_advice_goat`).
 - `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
+- `simple_mode.py`: **чистый модуль** (без Qt) Simple Mode карточки тикера:
+  `build_simple_card(e, catalyst)` → вердикт (Candidate/Watchlist/Skip/Нет данных),
+  3 факта, качество данных, строка катализатора, earnings, действие (пороги — константы).
+- `simple_mode_settings.py`: QSettings-синглтон Simple Mode (`is_simple_enabled`,
+  `set_simple_enabled`, сигнал `changed(bool)`); виджет `SimpleModePanel` и интеграция
+  Simple/Full в `recommendation_panel.py`, тумблер `⚡ Simple Mode` в main.py (top right).
 
 ## S&P 500: инструменты и прокси доходности (важно для backtest-запросов)
 
