@@ -92,6 +92,45 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
   благоприятности! направление — отдельное поле +/−/±), описание и **ожидание**
   (какой исход/метрика будет позитивным/негативным сюрпризом).
 
+## Earnings Snapshot (SEC EDGAR)
+
+**Продукт-решение:** компактный блок «Earnings» в RecommendationDialog
+(Quantitative Assessment) — ровно по последним 4 отдельным кварталам US-компании:
+Revenue, Net income, Diluted EPS, OCF, Capex, FCF, Cash, Total debt, Net debt,
+Net margin. Цель — быстрый взгляд «как манал квартальная динамика» без чтения
+десяти страниц 10-Q. Данные тянутся из SEC EDGAR (Company Facts API, XBRL),
+никогда не из Yahoo/FMP.
+
+- Реализация: `earnings_snapshot.py` — чистый модуль (requests, без Qt/matplotlib):
+  `build_earnings_snapshot(ticker)` → результат. `compute_snapshot(ticker, cik,
+  facts_doc)` — чистая математика для тестов. Кэш `earnings_cache.db` (kv, TTL 24ч):
+  тикер→CIK, факты по CIK, готовые снапшоты. Результат: `{ticker, cik, source,
+  as_of_filed_date, status (complete|partial|insufficient|unavailable),
+  missing_metrics, warnings, derived_metrics, source_coverage, quarters[]}`.
+- Quarter = «отдельный квартал»: прямой XBRL-факт duration 55–150 дн. (Q) —
+  `available`; иначе разность накопительных (H1 150–210, 9M 210–330, FY 330–400):
+  H1−Q1, 9M−H1, FY−9M — `derived`. Для одного периода приоритет прямого 3M.
+  **EPS не вычитается** (не аддитивен): только прямой 3M-факт, иначе `missing`.
+- Значения никогда не подставляются нулями: нет данных → `null`/`status=missing`.
+  fallback-теги: revenue `SalesRevenueNet`/`Revenues` (важно: `Revenues` =
+  total revenues, семантически шире), OCF `...ContinuingOperations`. Capex
+  (outflow < 0) нормализуется в положительный; fcf = ocf − capex;
+  net_debt = total_debt − cash; net_margin = net_income / revenue.
+- Status: `complete` (все базовые метрики из 4), `partial` (есть база ≥ частично,
+  но что-то из cash-flow/debt/cash отсутствует или EPS неполон), `insufficient`
+  (менее 2 базовых из 4), `unavailable` (тикер не найден в SEC).
+- SEC: требуется UA `TradeDiary/1.0 (trading-diary project; contact@example.com)`
+  (иначе 403), rate limit ≤10 req/s реализован в модуле. Restated/сравнительные
+  факты: дедуп по (start,end) → последний `filed`; `fy` как `min fy` по дате конца.
+- UI: `EarningsPanel` + `_EarningsLoaderThread(QThread)` в `recommendation_panel.py`
+  (таб «Earnings»). **Поток фоновый, сеть вне UI-потока**; `closeEvent`
+  RecommendationDialog → `_earningsPanel.shutdown()` (`thread.wait(5000)`).
+  Показывается последний квартал + кнопка «Показать 4 квартала» (таблица).
+  При `status != complete` — красное предупреждение «Часть отчётных показателей
+  недоступна; вывод ограничен».
+- Тесты: `tests/test_earnings_snapshot.py` (unit, синтетические факты) и
+  `tests/test_earnings_snapshot_integration.py` (CRC, живой SEC, skip без сети).
+
 ## Simple Mode карточки тикера
 
 **Продукт-решение:** ближайший месяц отлаживаем ТОЛЬКО Simple Mode. Full

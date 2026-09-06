@@ -12,9 +12,11 @@ from matplotlib.figure import Figure
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QColor
 
 import catalyst
+import earnings_snapshot
 import recommendation
 import simple_mode
 import simple_mode_settings
@@ -89,6 +91,219 @@ class SimpleModePanel(QtWidgets.QFrame):
             ' background-color: {}; padding: 4px 8px;'
             ' border-radius: 4px;'.format(card['verdict_color']))
         self._body.setText(_card_html_lines(card))
+
+
+class _EarningsLoaderThread(QThread):
+    """Фоновый загрузчик Earnings Snapshot (данные всегда вне UI-потока)."""
+
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, ticker, parent=None):
+        super().__init__(parent)
+        self._ticker = ticker
+
+    def run(self):
+        try:
+            snap = earnings_snapshot.build_earnings_snapshot(self._ticker)
+            self.loaded.emit(snap)
+        except Exception as exc:                    # pragma: no cover
+            self.failed.emit(str(exc))
+
+
+def _usd_M(v):
+    return '—' if v is None else '{:.0f}M'.format(v / 1e6)
+
+
+def _eps_txt(v):
+    return '—' if v is None else '{:.2f}'.format(v)
+
+
+def _margin_txt(v):
+    return '—' if v is None else '{:.1f}%'.format(v * 100.0)
+
+
+class EarningsPanel(QtWidgets.QWidget):
+    """Блок «Earnings Snapshot»: последний квартал + раскрытие 4 кварталов.
+
+    Источник — SEC EDGAR (Company Facts), загрузка в фоновом потоке
+    (запрещено тянуть сеть на UI-потоке). При status != complete показываем
+    заметное предупреждение.
+    """
+
+    _STATUS_TXT = {
+        'complete': 'Полные данные по 4 кварталам (SEC EDGAR).',
+        'partial': 'Данные ограничены: часть отчётных показателей недоступна.',
+        'insufficient': 'Данных SEC недостаточно для вывода.',
+        'unavailable': 'Тикер не найден в SEC (возможно, не US-listed).',
+    }
+
+    _COLS = [
+        ('period', 'Квартал'),
+        ('revenue', 'Выручка'), ('net_income', 'Net income'),
+        ('diluted_eps', 'EPS'), ('ocf', 'OCF'), ('capex', 'Capex'),
+        ('fcf', 'FCF'), ('cash', 'Cash'), ('net_debt', 'Net debt'),
+        ('net_margin', 'Маржа'),
+    ]
+
+    def __init__(self, ticker, parent=None):
+        super().__init__(parent)
+        self._loader = None
+        self._ticker = ''
+        self._result = None
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        head = QtWidgets.QLabel('Earnings Snapshot — SEC EDGAR (XBRL)')
+        head.setStyleSheet('color: {}; font-size: 13px; '
+                           'font-weight: bold;'.format(_TXT))
+        lay.addWidget(head)
+
+        self._statusLbl = QtWidgets.QLabel('Загрузка…')
+        self._statusLbl.setStyleSheet(
+            'color: {}; font-size: 11px;'.format(_MUTED))
+        lay.addWidget(self._statusLbl)
+
+        self._warnLbl = QtWidgets.QLabel('')
+        self._warnLbl.setWordWrap(True)
+        self._warnLbl.setVisible(False)
+        lay.addWidget(self._warnLbl)
+
+        self._summaryLbl = QtWidgets.QLabel('')
+        self._summaryLbl.setWordWrap(True)
+        self._summaryLbl.setStyleSheet(
+            'color: {}; font-size: 12px;'.format(_TXT))
+        lay.addWidget(self._summaryLbl)
+
+        self._table = QtWidgets.QTableWidget(0, len(self._COLS))
+        self._table.setHorizontalHeaderLabels(
+            [c for _, c in self._COLS])
+        self._table.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setVisible(False)
+        lay.addWidget(self._table, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        self._expandBtn = QtWidgets.QPushButton('Показать 4 квартала ▾')
+        self._expandBtn.setCheckable(True)
+        self._expandBtn.setVisible(False)
+        self._expandBtn.clicked.connect(self._toggle_table)
+        row.addWidget(self._expandBtn)
+        row.addStretch(1)
+        refresh = QtWidgets.QPushButton('Обновить')
+        refresh.clicked.connect(lambda: self.load(self._ticker))
+        row.addWidget(refresh)
+        lay.addLayout(row)
+
+        self.load(ticker)
+
+    def _toggle_table(self, checked):
+        self._table.setVisible(checked)
+        self._expandBtn.setText('Показать 4 квартала ▴' if checked
+                                else 'Показать 4 квартала ▾')
+
+    def load(self, ticker):
+        self._ticker = ticker or ''
+        self._result = None
+        self._statusLbl.setText('Загрузка…')
+        self._statusLbl.setStyleSheet(
+            'color: {}; font-size: 11px;'.format(_MUTED))
+        self._warnLbl.setVisible(False)
+        self._summaryLbl.setText('')
+        self._table.setRowCount(0)
+        self._table.setVisible(False)
+        self._expandBtn.setChecked(False)
+        self._expandBtn.setVisible(False)
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.wait(5000)
+        if not self._ticker:
+            self._show_result(None, 'Нет тикера.')
+            return
+        loader = _EarningsLoaderThread(self._ticker)
+        self._loader = loader
+        loader.loaded.connect(self._on_loaded)
+        loader.failed.connect(self._on_failed)
+        loader.start()
+
+    def shutdown(self):
+        """Ждать завершения фонового потока до закрытия окна."""
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.wait(5000)
+
+    def _on_loaded(self, snap):
+        self._result = snap
+        status = snap.get('status')
+        if status is None:
+            self._show_result(snap, 'Некорректный ответ сервиса.')
+            return
+        status_txt = self._STATUS_TXT.get(status, status)
+        warn = ''
+        if status == 'partial':
+            if snap.get('missing_metrics'):
+                warn = ('Часть отчётных показателей недоступна: {}. '
+                        'Вывод ограничен.'.format(
+                            ', '.join(snap['missing_metrics'])))
+            else:
+                warn = status_txt
+        self._show_result(snap, status_txt, warn=warn)
+
+    def _on_failed(self, msg):
+        self._show_result(None, 'Ошибка загрузки: {}'.format(msg))
+
+    def _show_result(self, snap, status_txt, warn=''):
+        self._statusLbl.setText(status_txt)
+        self._statusLbl.setStyleSheet('color: {}; font-size: 11px;'.format(
+            _MUTED if (snap is None or bool(warn)) else _TXT))
+        if snap is None or not snap.get('quarters'):
+            self._warnLbl.setText(warn or '')
+            self._warnLbl.setVisible(bool(warn))
+            return
+
+        q = snap['quarters'][-1]
+        self._summaryLbl.setText(
+            'Последний квартал: <b>Q{} {}</b> ({}): '
+            'выручка {}, net&nbsp;income {}, EPS {}, OCF {}, '
+            'Capex {}, FCF {}, Net&nbsp;debt {}, маржа {}'.format(
+                q['fiscal_quarter'], q['fiscal_year'], q['period_end'],
+                _usd_M(q['revenue']['value']),
+                _usd_M(q['net_income']['value']),
+                _eps_txt(q['diluted_eps']['value']),
+                _usd_M(q['ocf']['value']),
+                _usd_M(q['capex']['value']),
+                _usd_M(q['fcf']['value']),
+                _usd_M(q['net_debt']['value']),
+                _margin_txt(q['net_margin']['value'])))
+        self._summaryLbl.setTextFormat(Qt.TextFormat.RichText)
+
+        rows = snap['quarters']
+        self._table.setRowCount(len(rows))
+        for r, qq in enumerate(rows):
+            for c, (key, _) in enumerate(self._COLS):
+                if key == 'period':
+                    txt = 'Q{} {}'.format(qq['fiscal_quarter'],
+                                          qq['fiscal_year'])
+                elif key == 'diluted_eps':
+                    txt = _eps_txt(qq[key]['value'])
+                elif key == 'net_margin':
+                    txt = _margin_txt(qq[key]['value'])
+                else:
+                    txt = _usd_M(qq[key]['value'])
+                item = QtWidgets.QTableWidgetItem(txt)
+                item.setForeground(QColor(_TXT))
+                self._table.setItem(r, c, item)
+        self._table.resizeColumnsToContents()
+        self._table.setFixedHeight(40 + 28 * len(rows))
+        self._expandBtn.setVisible(len(rows) > 1)
+
+        self._warnLbl.setText(warn)
+        self._warnLbl.setVisible(bool(warn))
+        if warn:
+            self._warnLbl.setStyleSheet(
+                'color: #e57373; font-size: 12px; font-weight: bold;')
 
 
 class RecommendationPanel(QtWidgets.QWidget):
@@ -316,6 +531,8 @@ class RecommendationDialog(QtWidgets.QDialog):
             'EPS growth')
         self.tabs.addTab(self._build_dynamics_tab(rec['dynamics'], rec['short']),
                          'Динамика')
+        self._earningsPanel = EarningsPanel(e.get('ticker') or '')
+        self.tabs.addTab(self._earningsPanel, 'Earnings')
         root.addWidget(self.tabs, 1)
 
         row = QtWidgets.QHBoxLayout()
@@ -333,6 +550,10 @@ class RecommendationDialog(QtWidgets.QDialog):
         self._simple = simple_mode_settings.is_simple_enabled()
         self._apply_visible()
         simple_mode_settings.simple_changed().connect(self._on_mode_changed)
+
+    def closeEvent(self, event):
+        self._earningsPanel.shutdown()
+        super().closeEvent(event)
 
     def _apply_visible(self):
         simple = self._simple
