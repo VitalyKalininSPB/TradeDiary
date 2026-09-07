@@ -182,6 +182,7 @@ class SectorQuantDialog(QtWidgets.QDialog):
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemClicked.connect(self._on_item_clicked)
+        self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         root.addWidget(self.table, 3)
 
         self.detail = QtWidgets.QTextBrowser()
@@ -193,17 +194,13 @@ class SectorQuantDialog(QtWidgets.QDialog):
 
         row = QtWidgets.QHBoxLayout()
         self.refreshButton = QtWidgets.QPushButton('Refresh')
-        self.companiesButton = QtWidgets.QPushButton('View companies')
         self.closeButton = QtWidgets.QPushButton('Close')
         row.addWidget(self.refreshButton)
-        row.addWidget(self.companiesButton)
         row.addStretch(1)
         row.addWidget(self.closeButton)
         root.addLayout(row)
 
         self.refreshButton.clicked.connect(lambda: self._start(force=True))
-        self.companiesButton.clicked.connect(self._view_companies)
-        self.companiesButton.setEnabled(False)
         self.closeButton.clicked.connect(self.close)
 
         self._thread = None
@@ -286,17 +283,25 @@ class SectorQuantDialog(QtWidgets.QDialog):
         if 0 <= row < len(sectors):
             self._show_details(sectors[row])
 
+    def _on_item_double_clicked(self, item):
+        """Двойной клик по сектору → переход к компаниям сектора."""
+        if self._payload is None:
+            return
+        sectors = self._payload.get('sectors', [])
+        row = item.row()
+        if 0 <= row < len(sectors):
+            self._current_sector = sectors[row].get('sector', '')
+            self._view_companies()
+
     def _show_details(self, s):
         if s is None:
             self.detail.setPlainText('')
             self._current_sector = None
-            self.companiesButton.setEnabled(False)
             return
         st = s.get('status') or {}
         signal = st.get('status', '-')
         sector = s.get('sector', '')
         self._current_sector = sector
-        self.companiesButton.setEnabled(True)
         rel_pp = s.get('rel_margin_pp')
         if rel_pp is None:
             rel_line = '• Net Margin: {}'.format(self._fmt(s.get('net_margin'), '%'))

@@ -229,7 +229,9 @@ class EarningsPanel(QtWidgets.QWidget):
 
     _STATUS_TXT = {
         'complete': 'Полные данные по 4 кварталам (SEC EDGAR).',
-        'partial': 'Данные ограничены: часть отчётных показателей недоступна.',
+        'partial': 'Data quality: Partial. Не все отчётные показатели '
+                   'доступны за четыре квартала; значения последнего '
+                   'квартала показаны ниже.',
         'insufficient': 'Данных SEC недостаточно для вывода.',
         'unavailable': 'Тикер не найден в SEC (возможно, не US-listed).',
     }
@@ -341,13 +343,10 @@ class EarningsPanel(QtWidgets.QWidget):
             return
         status_txt = self._STATUS_TXT.get(status, status)
         warn = ''
-        if status == 'partial':
-            if snap.get('missing_metrics'):
-                warn = ('Часть отчётных показателей недоступна: {}. '
-                        'Вывод ограничен.'.format(
-                            ', '.join(snap['missing_metrics'])))
-            else:
-                warn = status_txt
+        if status == 'partial' and snap.get('missing_metrics'):
+            warn = ('Часть отчётных показателей недоступна: {}. '
+                    'Вывод ограничен.'.format(
+                        ', '.join(snap['missing_metrics'])))
         self._show_result(snap, status_txt, warn=warn)
 
     def _on_failed(self, msg):
@@ -639,7 +638,7 @@ class RecommendationDialog(QtWidgets.QDialog):
                 lambda v: '{:+.1f}%'.format(v), self._epsg_explanation(e, rec))
         self.tabs.addTab(eg_tab, 'EPS growth')
         self.tabs.addTab(self._build_dynamics_tab(rec['dynamics'], rec['short']),
-                         'Динамика')
+                         'Подтверждение')
         self._earningsPanel = EarningsPanel(e.get('ticker') or '')
         self.tabs.addTab(self._earningsPanel, 'Earnings')
         self.tabs.addTab(self._build_status_tab(e), 'Статус данных')
