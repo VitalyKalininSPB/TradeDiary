@@ -28,9 +28,27 @@ _MUTED = '#9aa0aa'
 _SECTOR_BAR = '#3a5a8c'
 _COMPANY_BAR = '#f0c14b'
 
+_PE_ON_PAR_PCT = 5.0   # ±5% к медиане сектора → «на уровне peers»
+_PCT_HIGH = 70.0       # pct_pe выше → заметно дороже большинства
+_PCT_LOW = 30.0        # pct_pe ниже → заметно дешевле большинства
+
 
 def _esc_html(s):
     return s.replace('&', '&amp;').replace('<', '&lt;')
+
+
+def _fmt_pe(v):
+    return '{:.1f}×'.format(v) if v is not None else '-'
+
+
+def _trailing_state(e, key):
+    """Состояние колонки «Компания сейчас»: ok / loss / unavailable."""
+    if e.get(key) is not None:
+        return 'ok'
+    margin = e.get('net_margin')
+    if margin is not None and margin < 0:
+        return 'loss'
+    return 'unavailable'
 
 
 def _make_text_selectable(root):
@@ -600,13 +618,26 @@ class RecommendationDialog(QtWidgets.QDialog):
             self._sectorNote = note
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_tab(
-            rec['pe_bars'], 'P/E (×)', lambda v: '{:.1f}'.format(v),
-            self._pe_explanation(e)), 'P/E')
-        self.tabs.addTab(self._build_tab(
-            rec['epsg_bars'], 'EPS growth (%)',
-            lambda v: '{:+.1f}%'.format(v), self._epsg_explanation(e, rec)),
-            'EPS growth')
+        pe_state = _trailing_state(e, 'trailing_pe')
+        if pe_state == 'loss':
+            pe_tab = self._build_bridge_tab(e)
+        elif pe_state == 'unavailable':
+            pe_tab = self._build_unavailable_tab(e, 'Trailing P/E')
+        else:
+            pe_tab = self._build_tab(
+                rec['pe_bars'], 'P/E (×)', lambda v: '{:.1f}'.format(v),
+                self._pe_explanation(e))
+        self.tabs.addTab(pe_tab, 'P/E')
+        eg_state = _trailing_state(e, 'trailing_eps_growth')
+        if eg_state == 'loss':
+            eg_tab = self._build_epsg_bridge_tab(e, rec)
+        elif eg_state == 'unavailable':
+            eg_tab = self._build_unavailable_tab(e, 'Trailing EPS growth')
+        else:
+            eg_tab = self._build_tab(
+                rec['epsg_bars'], 'EPS growth (%)',
+                lambda v: '{:+.1f}%'.format(v), self._epsg_explanation(e, rec))
+        self.tabs.addTab(eg_tab, 'EPS growth')
         self.tabs.addTab(self._build_dynamics_tab(rec['dynamics'], rec['short']),
                          'Динамика')
         self._earningsPanel = EarningsPanel(e.get('ticker') or '')
@@ -710,6 +741,111 @@ class RecommendationDialog(QtWidgets.QDialog):
         lay.addWidget(exp)
         canvas = FigureCanvas(_bars_figure(bars, title, fmt))
         lay.addWidget(canvas, 1)
+        return tab
+
+    def _build_bridge_tab(self, e):
+        """Recovery Layout: TTM-убыток → мост «факт → ожидание» вместо графика."""
+        ticker = e.get('ticker') or ''
+        sector = e.get('sector') or 'сектора'
+        margin = e.get('net_margin')
+        fp = e.get('forward_pe')
+        sfp = e.get('sector_median_pe')
+
+        gap = (fp / sfp - 1.0) * 100.0 if (fp is not None and sfp) else None
+        if gap is None:
+            verdict = 'по доступной оценке'
+        elif abs(gap) <= _PE_ON_PAR_PCT:
+            verdict = 'на уровне peers'
+        elif fp < sfp:
+            verdict = 'дешевле peers на {:.0f}%'.format(-gap)
+        else:
+            verdict = 'дороже peers на {:.0f}%'.format(gap)
+
+        parts = [
+            '<b>Фактическая прибыльность (TTM)</b>',
+            'Net margin: {:+.1f}%'.format(margin),
+            'Trailing P/E: не применимо — TTM-убыток',
+            '',
+            '<b>Ожидаемая оценка (Forward)</b>',
+        ]
+        if fp is not None:
+            parts.append('{} Forward P/E: {:.1f}×'.format(ticker, fp))
+        if sfp is not None:
+            parts.append('{} peers Forward P/E: {:.1f}×'.format(sector, sfp))
+        parts.append('Вывод: рынок оценивает ожидаемое восстановление '
+                     '{} {}'.format(ticker, verdict))
+        parts.append('')
+        parts.append('<span style="color:#e57373;">Риск: вся оценка '
+                     'опирается на прогноз возврата к прибыли.</span>')
+
+        tab = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(tab)
+        lay.setContentsMargins(10, 10, 10, 10)
+        body = QtWidgets.QLabel('<br>'.join(parts))
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setStyleSheet('color: {}; font-size: 13px;'.format(_TXT))
+        lay.addWidget(body)
+        lay.addStretch(1)
+        return tab
+
+    def _build_unavailable_tab(self, e, metric):
+        """Техническая недоступность «Компания сейчас» — без вывода об убытке."""
+        tab = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(tab)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(6)
+        head = QtWidgets.QLabel('{}: Data unavailable'.format(metric))
+        head.setStyleSheet('color: {}; font-weight: bold; font-size: 13px;'
+                           .format(_TXT))
+        lay.addWidget(head)
+        note = QtWidgets.QLabel(
+            'Значение отсутствует по технической причине (источник не '
+            'вернул данные). Вывод о прибыльности/убытке не делается — '
+            'подробности во вкладке «Статус данных».')
+        note.setWordWrap(True)
+        note.setStyleSheet('color: {}; font-size: 12px;'.format(_MUTED))
+        lay.addWidget(note)
+        lay.addStretch(1)
+        return tab
+
+    def _build_epsg_bridge_tab(self, e, rec):
+        """EPS growth при TTM-убытке: forward-сводка, историческая недоступна.
+
+        Без графика с 3 столбцами: «Компания сейчас» отсутствует, а секторный
+        TTM показан только как контекст (trailing и forward отвечают на разные
+        вопросы и не заменяют друг друга).
+        """
+        ticker = e.get('ticker') or ''
+        feg = e.get('eps_growth')
+        sfeg = e.get('sector_median_eps_growth')
+        steg = e.get('sector_median_trailing_eps_growth')
+        rel = rec.get('rel')
+
+        parts = ['<b>Forward EPS Growth</b>']
+        if feg is not None:
+            parts.append('{}: {:+.1f}%'.format(ticker, feg))
+        if sfeg is not None:
+            parts.append('Peers: {:+.1f}%'.format(sfeg))
+        if rel is not None:
+            parts.append('Преимущество: {:+.1f} п.п.'.format(rel))
+        parts.append('')
+        parts.append('Historical EPS growth {}: недоступен'.format(ticker))
+        if steg is not None:
+            parts.append('<span style="color:{};">Контекст: peers выросли '
+                         'на {:+.1f}% за TTM; это не сопоставимо с '
+                         'forward-прогнозом {}</span>'.format(
+                             _MUTED, steg, ticker))
+
+        tab = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(tab)
+        lay.setContentsMargins(10, 10, 10, 10)
+        body = QtWidgets.QLabel('<br>'.join(parts))
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setStyleSheet('color: {}; font-size: 13px;'.format(_TXT))
+        lay.addWidget(body)
+        lay.addStretch(1)
         return tab
 
     def _build_status_tab(self, e):
@@ -865,12 +1001,30 @@ class RecommendationDialog(QtWidgets.QDialog):
             lines.append('Разрыв trailing→forward {:+.0f}%: рынок закладывает '
                          'рост/падение EPS.'.format((tp / fp - 1.0) * 100.0))
         if fp is not None and sfp is not None:
-            lines.append('Forward P/E к сектору: компания {} средней по '
-                         'сектору.'.format('дешевле' if fp < sfp
-                                           else 'дороже'))
+            gap = (fp / sfp - 1.0) * 100.0
+            if abs(gap) <= _PE_ON_PAR_PCT:
+                rel_txt = 'Forward P/E: на уровне peers ({} vs {}).'.format(
+                    _fmt_pe(fp), _fmt_pe(sfp))
+            elif fp < sfp:
+                rel_txt = ('Forward P/E: дешевле peers на {:.0f}% '
+                           '({} vs {}).'.format(-gap, _fmt_pe(fp),
+                                                _fmt_pe(sfp)))
+            else:
+                rel_txt = ('Forward P/E: дороже peers на {:.0f}% '
+                           '({} vs {}).'.format(gap, _fmt_pe(fp),
+                                                _fmt_pe(sfp)))
+            lines.append(rel_txt)
         if pct is not None:
-            lines.append('Оценка: дороже {:.0f}% компаний сектора '
-                         '(дешевле {:.0f}%).'.format(pct, 100 - pct))
+            if pct > _PCT_HIGH:
+                pos_txt = ('Оценка: дороже {:.0f}% компаний сектора '
+                           '(дешевле {:.0f}%).'.format(pct, 100 - pct))
+            elif pct < _PCT_LOW:
+                pos_txt = ('Оценка: дешевле {:.0f}% компаний сектора '
+                           '(дороже {:.0f}%).'.format(100 - pct, pct))
+            else:
+                pos_txt = 'Оценка: на уровне медианы сектора — не дороже ' \
+                          'и не дешевле большинства peers.'
+            lines.append(pos_txt)
         if not lines:
             lines.append('Нет данных по P/E.')
         return '\n'.join(lines)

@@ -107,6 +107,7 @@ class _TickerAnalyzeThread(QtCore.QThread):
             'eps_growth': metrics.get('eps_growth'),
             'trailing_eps_growth': metrics.get('trailing_eps_growth'),
             'revenue_growth': metrics.get('revenue_growth'),
+            'net_margin': metrics.get('net_margin'),
             'net_margin_yoy': metrics.get('net_margin_yoy'),
             'surprise_avg': metrics.get('surprise_avg'),
             'surprise_last': metrics.get('surprise_last'),
