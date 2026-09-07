@@ -14,6 +14,7 @@ import datetime
 import os
 import re
 import sqlite3
+import time
 
 import requests
 
@@ -401,7 +402,7 @@ def _yahoo_returns(ticker):
         try:
             url = ('https://{}.finance.yahoo.com/v8/finance/chart/{}'
                    '?range=1y&interval=1d').format(host, ticker)
-            r = requests.get(url, headers=_UA, timeout=20)
+            r = requests.get(url, headers=_YAHOO_UA, timeout=20)
             r.raise_for_status()
             result = (r.json().get('chart') or {}).get('result')
             if not result:
@@ -434,21 +435,51 @@ def _yahoo_returns(ticker):
 _YAHOO_SESSION = None
 _YAHOO_CRUMB = None
 
+# Yahoo (crumb/quoteSummary) блокирует не-браузерные User-Agent (429/401):
+# для quoteSummary-эндпоинтов используем браузерный UA.
+_YAHOO_UA = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/126.0.0.0 Safari/537.36'),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+
+
+def _fetch_yahoo_crumb(session):
+    """Crumb для quoteSummary: fc.yahoo.com cookie + retry на 429, 2 хоста."""
+    try:
+        session.get('https://fc.yahoo.com', timeout=10)
+    except requests.RequestException:
+        pass
+    for host in ('query1', 'query2'):
+        for attempt in range(3):
+            try:
+                cr = session.get(
+                    'https://{}.finance.yahoo.com/v1/test/getcrumb'.format(host),
+                    timeout=10)
+            except requests.RequestException:
+                continue
+            body = cr.text.strip()
+            if cr.status_code == 200 and body and body != 'Too Many Requests':
+                return body
+            time.sleep(1.0 + attempt)
+    return None
+
 
 def _yahoo_session():
-    """Session Yahoo с cookie и crumb для quoteSummary (lazy, кэш на процесс)."""
+    """Session Yahoo с cookie и crumb для quoteSummary (lazy, кэш на процесс).
+
+    Crumb добывается браузерным UA; если первый раз не удался — повторная
+    попытка при следующем вызове (пока _YAHOO_CRUMB is None).
+    """
     global _YAHOO_SESSION, _YAHOO_CRUMB
     if _YAHOO_SESSION is None:
         s = requests.Session()
-        s.headers.update(_UA)
-        try:
-            s.get('https://fc.yahoo.com', timeout=10)
-            cr = s.get('https://query1.finance.yahoo.com/v1/test/getcrumb',
-                       timeout=10)
-            _YAHOO_CRUMB = cr.text.strip() if cr.status_code == 200 else None
-        except Exception:  # noqa: BLE001
-            _YAHOO_CRUMB = None
+        s.headers.update(_YAHOO_UA)
         _YAHOO_SESSION = s
+    if _YAHOO_CRUMB is None:
+        _YAHOO_CRUMB = _fetch_yahoo_crumb(_YAHOO_SESSION)
     return _YAHOO_SESSION, _YAHOO_CRUMB
 
 

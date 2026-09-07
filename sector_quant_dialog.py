@@ -116,6 +116,7 @@ class _TickerAnalyzeThread(QtCore.QThread):
             'short_change': metrics.get('short_change'),
             'short_ratio': metrics.get('short_ratio'),
             'short_date': metrics.get('short_date'),
+            'data_status': metrics.get('data_status') or {},
             'sector_median_pe': None, 'sector_median_trailing_pe': None,
             'sector_median_eps_growth': None,
             'sector_median_trailing_eps_growth': None, 'pct_pe': None,
