@@ -13,7 +13,7 @@ from matplotlib.figure import Figure
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 
 import catalyst
 import earnings_snapshot
@@ -31,6 +31,84 @@ _COMPANY_BAR = '#f0c14b'
 
 def _esc_html(s):
     return s.replace('&', '&amp;').replace('<', '&lt;')
+
+
+def _make_text_selectable(root):
+    """Разрешить выделение и копирование (Ctrl+C) текста во всех QLabel."""
+    flags = (Qt.TextInteractionFlag.TextSelectableByMouse
+             | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+    for label in root.findChildren(QtWidgets.QLabel):
+        label.setTextInteractionFlags(flags)
+
+
+def _install_table_copy(table):
+    """Ctrl+C копирует выделенные ячейки QTableWidget как tab-separated текст."""
+    shortcut = QShortcut(QKeySequence.Copy, table)
+    shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+
+    def _copy():
+        selected = table.selectedItems()
+        if not selected:
+            return
+        rows = sorted({item.row() for item in selected})
+        cols = sorted({item.column() for item in selected})
+        cells = {(item.row(), item.column()): item.text()
+                 for item in selected}
+        text = '\n'.join(
+            '\t'.join(cells.get((r, c), '') for c in cols)
+            for r in rows)
+        QtWidgets.QApplication.clipboard().setText(text)
+
+    shortcut.activated.connect(_copy)
+
+
+# Блоки статуса данных (ключ data_status → подпись в UI).
+_DATA_BLOCKS = [
+    ('pe_eps', 'Forward P/E / EPS estimates'),
+    ('peers', 'Peers'),
+    ('short', 'Short interest'),
+    ('surprises', 'Earnings surprises'),
+    ('margin', 'Margin trend'),
+    ('revision', 'Revisions (analyst estimates)'),
+]
+
+_DATA_STATUS_TXT = {
+    None: 'Загружено',
+    'not_requested': 'Не запрашивалось',
+    'http_error': 'HTTP-ошибка источника',
+    'rate_limited': 'Лимит запросов источника',
+    'parse_error': 'Ошибка разбора ответа',
+    'schema_changed': 'Схема страницы источника изменилась',
+    'source_empty': 'Источник не вернул данные',
+    'calculation_unavailable': 'Расчёт недоступен',
+}
+
+_DATA_LOADED_KEYS = {
+    'pe_eps': ('forward_pe', 'eps_growth', 'trailing_pe',
+               'trailing_eps_growth'),
+    'peers': ('sector_median_pe', 'sector_median_eps_growth',
+              'sector_median_trailing_pe'),
+    'short': ('short_float', 'short_date', 'short_ratio'),
+    'surprises': ('surprise_avg',),
+    'margin': ('net_margin_yoy',),
+}
+
+
+def _data_status_rows(e):
+    """[(Блок, reason)] — статус данных из e['data_status'] (fallback по полям)."""
+    ds = dict(e.get('data_status') or {})
+    out = []
+    for key, label in _DATA_BLOCKS:
+        reason = ds.get(key)
+        if reason is None and key in _DATA_LOADED_KEYS:
+            if any(e.get(k) is not None for k in _DATA_LOADED_KEYS[key]):
+                reason = None
+            else:
+                reason = 'not_requested'
+        if key == 'revision' and reason is None:
+            reason = 'calculation_unavailable'
+        out.append((label, reason))
+    return out
 
 
 def _card_html_lines(card):
@@ -205,6 +283,9 @@ class EarningsPanel(QtWidgets.QWidget):
         self._table.setVisible(checked)
         self._expandBtn.setText('Показать 4 квартала ▴' if checked
                                 else 'Показать 4 квартала ▾')
+
+    def table(self):
+        return self._table
 
     def load(self, ticker):
         self._ticker = ticker or ''
@@ -491,9 +572,6 @@ class RecommendationDialog(QtWidgets.QDialog):
     """Сравнение с сектором: 4-столбцовые графики (P/E, EPS growth) по
     вкладкам + рекомендация с объяснениями для продвинутых пользователей."""
 
-    _REV_TXT = {'up': '↑ растут', 'flat': '→ стабильны',
-                'down': '↓ снижаются'}
-
     def __init__(self, e, parent=None):
         super().__init__(parent)
         self._e = e
@@ -533,6 +611,7 @@ class RecommendationDialog(QtWidgets.QDialog):
                          'Динамика')
         self._earningsPanel = EarningsPanel(e.get('ticker') or '')
         self.tabs.addTab(self._earningsPanel, 'Earnings')
+        self.tabs.addTab(self._build_status_tab(e), 'Статус данных')
         root.addWidget(self.tabs, 1)
 
         row = QtWidgets.QHBoxLayout()
@@ -550,6 +629,10 @@ class RecommendationDialog(QtWidgets.QDialog):
         self._simple = simple_mode_settings.is_simple_enabled()
         self._apply_visible()
         simple_mode_settings.simple_changed().connect(self._on_mode_changed)
+
+        _make_text_selectable(self)
+        _install_table_copy(self._dynamicsTable)
+        _install_table_copy(self._earningsPanel.table())
 
     def closeEvent(self, event):
         self._earningsPanel.shutdown()
@@ -629,6 +712,43 @@ class RecommendationDialog(QtWidgets.QDialog):
         lay.addWidget(canvas, 1)
         return tab
 
+    def _build_status_tab(self, e):
+        """Статус загрузки блоков данных: Блок → причина отсутствия."""
+        tab = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(tab)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+        hint = QtWidgets.QLabel(
+            'Статус загрузки блоков данных. «Источник не вернул данные» — '
+            'блок отсутствует в ответе; «Расчёт недоступен» — значение '
+            'пока не вычисляется (нужен временной ряд analyst estimates).')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: {}; font-size: 12px;'.format(_MUTED))
+        lay.addWidget(hint)
+
+        rows = _data_status_rows(e)
+        table = QtWidgets.QTableWidget(len(rows), 2)
+        table.setHorizontalHeaderLabels(['Блок', 'Статус'])
+        table.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        for r, (block, reason) in enumerate(rows):
+            b = QtWidgets.QTableWidgetItem(block)
+            b.setForeground(QColor(_TXT))
+            s = QtWidgets.QTableWidgetItem(
+                _DATA_STATUS_TXT.get(reason, str(reason)))
+            s.setForeground(QColor('#81c784' if reason is None else _MUTED))
+            table.setItem(r, 0, b)
+            table.setItem(r, 1, s)
+        table.resizeColumnsToContents()
+        table.setFixedHeight(36 + 28 * len(rows))
+        lay.addWidget(table)
+        lay.addStretch(1)
+        self._statusTable = table
+        _install_table_copy(table)
+        return tab
+
     def _build_dynamics_tab(self, dyn, short):
         """Turnaround vs Value Trap: таблица показателей + вердикт + риск."""
         tab = QtWidgets.QWidget()
@@ -654,6 +774,7 @@ class RecommendationDialog(QtWidgets.QDialog):
             QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
+        self._dynamicsTable = table
         table.setRowCount(len(dyn['rows']))
         for r, (name, value, meaning) in enumerate(dyn['rows']):
             for c, v in enumerate((name, value, meaning)):
@@ -781,10 +902,6 @@ class RecommendationDialog(QtWidgets.QDialog):
             lines.append('Относительный рост к сектору: {:+.1f} п.п. — {} '
                          'среднего по сектору.'.format(
                              rel, 'выше' if rel >= 0 else 'ниже'))
-        if rec['revision'] is not None:
-            lines.append('Ожидания аналитиков: {} (оценка по разрыву '
-                         'trailing↔forward P/E).'.format(
-                             RecommendationDialog._REV_TXT[rec['revision']]))
         if rec['status']:
             lines.append('Статус: {}'.format(rec['status']))
         if not lines:

@@ -205,6 +205,7 @@ def _evaluate(c):
         'sector_median_roic': None, 'pct_roic': None,
         'sector_median_debt': None, 'pct_debt': None,
         'company_score': None, 'score_rounded': None, 'rank': None,
+        'data_status': dict(c.get('data_status') or {}),
     }
     missing = [f for f in REQUIRED_FIELDS
            if c.get(f) is None or (f in _STRING_FIELDS and c.get(f) == '')]
@@ -359,5 +360,12 @@ def _rank_sector(sector, companies):
                     key=lambda e: e['company_score'], reverse=True)
     for i, e in enumerate(ranked, start=1):
         e['rank'] = i
+    peers_ok = any(x is not None for x in
+                   (median_pe, median_epsg, median_tpe, median_tepsg))
+    for e in entries:
+        ds = dict(e.get('data_status') or {})
+        ds['peers'] = None if peers_ok else 'source_empty'
+        ds['revision'] = 'calculation_unavailable'
+        e['data_status'] = ds
     entries.sort(key=lambda e: (e['rank'] is None, e['rank']))
     return entries

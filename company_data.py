@@ -25,6 +25,20 @@ DB_PATH = os.path.join(_DIR, 'sector_quant.db')
 TTL_HOURS = 24
 _UA = {'User-Agent': 'TradeDiary/1.1 (company-metrics; ti-diary-user@localhost)'}
 
+# Причины отсутствия блока данных (значение в data_status == None = загружено).
+NULL_REASONS = (
+    'not_requested', 'http_error', 'rate_limited', 'parse_error',
+    'schema_changed', 'source_empty', 'calculation_unavailable',
+)
+
+
+class _BlockError(Exception):
+    """Сбой загрузки одного блока данных с классифицированной причиной."""
+
+    def __init__(self, reason, detail=''):
+        super().__init__(detail or reason)
+        self.reason = reason
+
 
 def _conn():
     conn = sqlite3.connect(DB_PATH)
@@ -65,6 +79,8 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN short_ratio REAL")
     if cols and 'short_date' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN short_date TEXT")
+    if cols and 'data_status' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN data_status TEXT")
     return conn
 
 
@@ -89,58 +105,110 @@ def _parse_abbrev(s):
 
 
 # ------------------------------------------------------------------- fetch
+def _get(url):
+    """GET с классификацией сетевых ошибок; бросает _BlockError."""
+    try:
+        r = requests.get(url, headers=_UA, timeout=25)
+    except requests.RequestException as e:
+        raise _BlockError('http_error', str(e))
+    if r.status_code == 429:
+        raise _BlockError('rate_limited', 'HTTP 429')
+    if r.status_code != 200:
+        raise _BlockError('http_error', 'HTTP {}'.format(r.status_code))
+    return r
+
+
+def _guard(block, fn, reasons, ticker):
+    """Выполнить блок-фетчер, записать причину сбоя (block) в reasons."""
+    try:
+        return fn(ticker)
+    except _BlockError as e:
+        if block:
+            reasons.setdefault(block, e.reason)
+        return None
+    except Exception:  # noqa: BLE001 - неожиданный сбой разбора
+        if block:
+            reasons.setdefault(block, 'parse_error')
+        return None
+
+
+def _mark(reasons, block, metrics, keys):
+    """Статус блока по фактическому наличию хотя бы одного из ключей."""
+    if any(metrics.get(k) is not None for k in keys):
+        reasons[block] = None
+    else:
+        reasons.setdefault(block, 'source_empty')
+
+
+def _margin_yoy_sec_fallback(ticker):
+    """Детерминированный fallback net_margin_yoy через SEC Company Facts."""
+    try:
+        from earnings_snapshot import net_margin_yoy_for
+        return net_margin_yoy_for(ticker)
+    except Exception:  # noqa: BLE001 - best-effort
+        return None, 'http_error'
+
+
 def fetch_company_metrics(ticker):
     """Живые метрики компании. None, если не хватает обязательных полей.
 
     Возвращает dict {net_margin, net_margin_yoy, return_1m, return_1y,
     forward_pe, eps_growth (forward), trailing_pe, trailing_eps_growth,
-    revenue_growth, roic, debt_equity}. Опциональны: forward_pe,
+    revenue_growth, roic, debt_equity, data_status}. Опциональны: forward_pe,
     eps_growth, trailing_pe, trailing_eps_growth, net_margin_yoy,
-    revenue_growth, roic, debt_equity.
+    revenue_growth, roic, debt_equity. `data_status` — {block: reason}: None
+    = блок загружен, иначе причина из NULL_REASONS.
     """
-    sa = _stockanalysis_metrics(ticker)
+    reasons = {}
+    sa = _guard('pe_eps', _stockanalysis_metrics, reasons, ticker)
+    st = _guard('short', _stockanalysis_statistics, reasons, ticker)
+    fc = _guard('pe_eps', _stockanalysis_forecast, reasons, ticker)
+    eh = _guard('surprises', _yahoo_earnings_history, reasons, ticker)
+    sd = _guard('short', _yahoo_short_interest, reasons, ticker)
     try:
-        st = _stockanalysis_statistics(ticker)
-    except Exception:  # noqa: BLE001 - optional fields must not break
-        st = None
-    try:
-        fc = _stockanalysis_forecast(ticker)
-    except Exception:  # noqa: BLE001 - optional fields must not break
-        fc = None
-    try:
-        eh = _yahoo_earnings_history(ticker)
-    except Exception:  # noqa: BLE001 - optional fields must not break
-        eh = None
-    try:
-        sd = _yahoo_short_interest(ticker)
-    except Exception:  # noqa: BLE001 - optional fields must not break
-        sd = None
-    yh = _yahoo_returns(ticker)
+        yh = _yahoo_returns(ticker)
+    except Exception:  # noqa: BLE001 - обязательный блок, best-effort
+        yh = None
     if not sa or not yh:
         return None
     net_margin, yoy = sa['net_margin'], sa['net_margin_yoy']
     ret_1m, ret_1y = yh
     if net_margin is None or ret_1m is None or ret_1y is None:
         return None
-    return {'net_margin': net_margin, 'net_margin_yoy': yoy,
-            'return_1m': ret_1m, 'return_1y': ret_1y,
-            'forward_pe': sa['forward_pe'],
-            'eps_growth': (fc or {}).get('forward_eps_growth'),
-            'trailing_pe': sa.get('trailing_pe'),
-            'trailing_eps_growth': sa.get('trailing_eps_growth'),
-            'revenue_growth': sa['revenue_growth'],
-            'roic': (st or {}).get('roic'),
-            'debt_equity': (st or {}).get('debt_equity'),
-            'earnings_date': (st or {}).get('earnings_date'),
-            'surprise_avg': (eh or {}).get('surprise_avg'),
-            'surprise_last': (eh or {}).get('surprise_last'),
-            'surprise_n': (eh or {}).get('surprise_n'),
-            'sector': sa.get('sector'),
-            'company_name': sa.get('company_name'),
-            'short_float': (st or {}).get('short_float'),
-            'short_change': (st or {}).get('short_change'),
-            'short_ratio': (st or {}).get('short_ratio'),
-            'short_date': (sd or {}).get('short_date')}
+
+    if yoy is None:
+        yoy, yoy_reason = _margin_yoy_sec_fallback(ticker)
+        reasons['margin'] = yoy_reason
+    else:
+        yoy_reason = None
+
+    m = {'net_margin': net_margin, 'net_margin_yoy': yoy,
+         'return_1m': ret_1m, 'return_1y': ret_1y,
+         'forward_pe': sa['forward_pe'],
+         'eps_growth': (fc or {}).get('forward_eps_growth'),
+         'trailing_pe': sa.get('trailing_pe'),
+         'trailing_eps_growth': sa.get('trailing_eps_growth'),
+         'revenue_growth': sa['revenue_growth'],
+         'roic': (st or {}).get('roic'),
+         'debt_equity': (st or {}).get('debt_equity'),
+         'earnings_date': (st or {}).get('earnings_date'),
+         'surprise_avg': (eh or {}).get('surprise_avg'),
+         'surprise_last': (eh or {}).get('surprise_last'),
+         'surprise_n': (eh or {}).get('surprise_n'),
+         'sector': sa.get('sector'),
+         'company_name': sa.get('company_name'),
+         'short_float': (st or {}).get('short_float'),
+         'short_change': (st or {}).get('short_change'),
+         'short_ratio': (st or {}).get('short_ratio'),
+         'short_date': (sd or {}).get('short_date')}
+    _mark(reasons, 'pe_eps', m,
+          ('forward_pe', 'eps_growth', 'trailing_pe',
+           'trailing_eps_growth'))
+    _mark(reasons, 'short', m, ('short_float', 'short_date', 'short_ratio'))
+    _mark(reasons, 'surprises', m, ('surprise_avg',))
+    _mark(reasons, 'margin', m, ('net_margin_yoy',))
+    m['data_status'] = reasons
+    return m
 
 
 def _stockanalysis_metrics(ticker):
@@ -148,17 +216,18 @@ def _stockanalysis_metrics(ticker):
 
     Плюс trailing P/E (peRatio) и trailing EPS growth (epsGrowth — TTM YoY).
     """
-    r = requests.get('https://stockanalysis.com/stocks/{}/'.format(
-        ticker.lower()), headers=_UA, timeout=25)
-    r.raise_for_status()
+    r = _get('https://stockanalysis.com/stocks/{}/'.format(ticker.lower()))
     html = r.text
     m = re.search(r'summary:\{text:"(?:[^"\\]|\\.)*?"\}(.*?),description:',
                   html, re.DOTALL)
     block = m.group(1) if m else html
+    schema_ok = m is not None
     revenue = _parse_abbrev(_grab(r'revenue:"([^"]+)"', block))
     net_income = _parse_abbrev(_grab(r'netIncome:"([^"]+)"', block))
     if not revenue or not net_income:
-        return None
+        raise _BlockError(
+            'schema_changed' if not schema_ok else 'source_empty',
+            'revenue/netIncome не найдены')
     margin = net_income / revenue * 100.0
     yoy = None
     ni_g = _grab(r'netIncomeGrowth:(-?[0-9.]+)', block)
@@ -223,19 +292,20 @@ def _stockanalysis_forecast(ticker):
 
     SSR-блок: estimates:{stats:{annual:{epsNext:{last:..,this:..,growth:..}}}}.
     """
-    r = requests.get('https://stockanalysis.com/stocks/{}/forecast/'.format(
-        ticker.lower()), headers=_UA, timeout=25)
-    r.raise_for_status()
+    r = _get('https://stockanalysis.com/stocks/{}/forecast/'.format(
+        ticker.lower()))
     m = re.search(
         r'epsNext:\{last:[0-9.]+,this:[0-9.]+,growth:(-?[0-9.]+)', r.text)
     if not m:
-        return None
+        if re.search(r'estimates:', r.text):
+            raise _BlockError('source_empty', 'epsNext не найден')
+        raise _BlockError('schema_changed', 'estimates блок не найден')
     try:
         g = float(m.group(1))
     except ValueError:
-        return None
+        raise _BlockError('parse_error', 'epsNext.growth не число')
     if not (g == g and g > -200.0):
-        return None
+        raise _BlockError('source_empty', 'epsNext.growth вне диапазона')
     return {'forward_eps_growth': g}
 
 
@@ -253,10 +323,13 @@ def _stat_value(html, stat_id):
 
 def _stockanalysis_statistics(ticker):
     """ROIC (%, TTM), Debt/Equity, дата отчёта и Short Interest из statistics."""
-    r = requests.get('https://stockanalysis.com/stocks/{}/statistics/'.format(
-        ticker.lower()), headers=_UA, timeout=25)
-    r.raise_for_status()
+    r = _get('https://stockanalysis.com/stocks/{}/statistics/'.format(
+        ticker.lower()))
     html = r.text
+    if not re.search(r'id:"roic"', html) \
+            and not re.search(r'id:"earningsdate"', html) \
+            and not re.search(r'shortSelling:', html):
+        raise _BlockError('schema_changed', 'SSR statistics не найден')
     roic = _stat_value(html, 'roic')
     if roic is not None and not (roic == roic and roic > -100.0):
         roic = None
@@ -293,27 +366,33 @@ def _stockanalysis_statistics(ticker):
 def _yahoo_short_interest(ticker):
     """Дата последнего среза Short Interest из Yahoo defaultKeyStatistics.
 
-    Best-effort: если Yahoo недоступен (crumb/троттлинг) — None.
+    При сбое бросает _BlockError (rate_limited/http_error/source_empty).
     """
+    session, crumb = _yahoo_session()
+    if not crumb:
+        raise _BlockError('rate_limited', 'Yahoo crumb недоступен')
+    url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
+           '?modules=defaultKeyStatistics&crumb={}').format(ticker, crumb)
     try:
-        session, crumb = _yahoo_session()
-        if not crumb:
-            return None
-        url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
-               '?modules=defaultKeyStatistics&crumb={}').format(ticker, crumb)
         r = session.get(url, timeout=20)
-        r.raise_for_status()
+    except requests.RequestException as e:
+        raise _BlockError('http_error', str(e))
+    if r.status_code == 429:
+        raise _BlockError('rate_limited', 'HTTP 429')
+    if r.status_code != 200:
+        raise _BlockError('http_error', 'HTTP {}'.format(r.status_code))
+    try:
         result = (r.json().get('quoteSummary') or {}).get('result')
-        if not result:
-            return None
-        ks = result[0].get('defaultKeyStatistics') or {}
-        short_date = (ks.get('shortDate') or {}).get('raw')
-        if not short_date:
-            return None
-        return {'short_date': datetime.date.fromtimestamp(
-            short_date).isoformat()}
-    except Exception:  # noqa: BLE001 - best-effort
-        return None
+    except ValueError as e:
+        raise _BlockError('parse_error', str(e))
+    if not result:
+        raise _BlockError('schema_changed', 'quoteSummary без result')
+    ks = result[0].get('defaultKeyStatistics') or {}
+    short_date = (ks.get('shortDate') or {}).get('raw')
+    if not short_date:
+        raise _BlockError('source_empty', 'shortDate отсутствует')
+    return {'short_date': datetime.date.fromtimestamp(
+        short_date).isoformat()}
 
 
 def _yahoo_returns(ticker):
@@ -376,36 +455,43 @@ def _yahoo_session():
 def _yahoo_earnings_history(ticker):
     """Сюрпризы «факт vs прогноз» за последние 4 квартала (Yahoo earningsHistory).
 
-    Возвращает {'surprise_avg', 'surprise_last', 'surprise_n'} или None.
+    Возвращает {'surprise_avg', 'surprise_last', 'surprise_n'}.
+    При сбое бросает _BlockError (rate_limited/http_error/source_empty).
     """
+    session, crumb = _yahoo_session()
+    if not crumb:
+        raise _BlockError('rate_limited', 'Yahoo crumb недоступен')
+    url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
+           '?modules=earningsHistory&crumb={}').format(ticker, crumb)
     try:
-        session, crumb = _yahoo_session()
-        if not crumb:
-            return None
-        url = ('https://query1.finance.yahoo.com/v10/finance/quoteSummary/{}'
-               '?modules=earningsHistory&crumb={}').format(ticker, crumb)
         r = session.get(url, timeout=20)
-        r.raise_for_status()
+    except requests.RequestException as e:
+        raise _BlockError('http_error', str(e))
+    if r.status_code == 429:
+        raise _BlockError('rate_limited', 'HTTP 429')
+    if r.status_code != 200:
+        raise _BlockError('http_error', 'HTTP {}'.format(r.status_code))
+    try:
         result = (r.json().get('quoteSummary') or {}).get('result')
-        if not result:
-            return None
-        history = (result[0].get('earningsHistory') or {}).get('history') or []
-        surprises = []
-        for h in history:
-            sp = (h.get('surprisePercent') or {}).get('raw')
-            if sp is not None:
-                try:
-                    surprises.append(float(sp))
-                except (TypeError, ValueError):
-                    pass
-        if len(surprises) < 2:
-            return None
-        recent = surprises[-4:]
-        return {'surprise_avg': sum(recent) / len(recent),
-                'surprise_last': recent[-1],
-                'surprise_n': len(recent)}
-    except Exception:  # noqa: BLE001 - best-effort
-        return None
+    except ValueError as e:
+        raise _BlockError('parse_error', str(e))
+    if not result:
+        raise _BlockError('schema_changed', 'quoteSummary без result')
+    history = (result[0].get('earningsHistory') or {}).get('history') or []
+    surprises = []
+    for h in history:
+        sp = (h.get('surprisePercent') or {}).get('raw')
+        if sp is not None:
+            try:
+                surprises.append(float(sp))
+            except (TypeError, ValueError):
+                pass
+    if len(surprises) < 2:
+        raise _BlockError('source_empty', 'нет сюрпризов за 4 квартала')
+    recent = surprises[-4:]
+    return {'surprise_avg': sum(recent) / len(recent),
+            'surprise_last': recent[-1],
+            'surprise_n': len(recent)}
 
 
 # ------------------------------------------------------------------ cache
@@ -417,16 +503,23 @@ def _metrics_cached(ticker):
             "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
             "trailing_pe, trailing_eps_growth, surprise_avg, surprise_last, "
             "surprise_n, earnings_date, short_float, short_change, "
-            "short_ratio, short_date, fetched_at "
+            "short_ratio, short_date, data_status, fetched_at "
             "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[19])
+        fetched = datetime.datetime.fromisoformat(row[20])
     except ValueError:
         return None
+    data_status = None
+    if row[19]:
+        try:
+            import json
+            data_status = json.loads(row[19])
+        except (TypeError, ValueError):
+            data_status = None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
             'return_1m': row[2], 'return_1y': row[3],
             'forward_pe': row[4], 'eps_growth': row[5],
@@ -436,10 +529,13 @@ def _metrics_cached(ticker):
             'surprise_last': row[12], 'surprise_n': row[13],
             'earnings_date': row[14], 'short_float': row[15],
             'short_change': row[16], 'short_ratio': row[17],
-            'short_date': row[18], 'fetched_at': fetched}
+            'short_date': row[18], 'data_status': data_status,
+            'fetched_at': fetched}
 
 
 def _save_metrics(ticker, sector, metrics):
+    import json
+    data_status = json.dumps(metrics.get('data_status') or {})
     conn = _conn()
     try:
         conn.execute(
@@ -448,8 +544,8 @@ def _save_metrics(ticker, sector, metrics):
             "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
             "debt_equity, trailing_pe, trailing_eps_growth, surprise_avg, "
             "surprise_last, surprise_n, earnings_date, short_float, "
-            "short_change, short_ratio, short_date, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "short_change, short_ratio, short_date, data_status, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
@@ -460,7 +556,7 @@ def _save_metrics(ticker, sector, metrics):
              metrics.get('surprise_n'), metrics.get('earnings_date'),
              metrics.get('short_float'), metrics.get('short_change'),
              metrics.get('short_ratio'), metrics.get('short_date'),
-             datetime.datetime.now().isoformat()))
+             data_status, datetime.datetime.now().isoformat()))
         conn.commit()
     finally:
         conn.close()
@@ -508,6 +604,7 @@ def _apply_metrics(c, m):
         c['shortChangePct'] = m.get('short_change')
         c['shortRatio'] = m.get('short_ratio')
         c['shortDate'] = m.get('short_date')
+    c['data_status'] = m.get('data_status') or {}
     return c
 
 

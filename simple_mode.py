@@ -44,9 +44,9 @@ _VERDICT_COLOR = {
 _ACTION = {
     'candidate': 'Действие: искать точку входа — технический сетап или '
                  'подтверждённый катализатор; проверить риски.',
-    'watchlist': 'Действие: ждать технический сетап и/или следующего '
-                 'фундаментального подтверждения. Не открывать позицию '
-                 'только по этому экрану.',
+    'watchlist': 'Действие: Watchlist. Открыть Details при техническом '
+                 'сетапе или после нового отчётного/количественного '
+                 'подтверждения.',
     'skip': 'Действие: преимущества нет или есть критический красный флаг — '
             'не открывать позицию.',
     'no_data': 'Действие: метрик недостаточно — повторить анализ после '
@@ -135,14 +135,14 @@ def build_simple_card(e, catalyst=None):
 
     # Подтверждающие слои «качества» истории. Без них относительное
     # преимущество по EPS-прогнозу считается недоказанным → Watchlist.
+    # Revision (аналитики) сюда не входит: он считается из временного ряда
+    # analyst estimates и пока не реализован (calculation_unavailable).
     missing = []
     if sa is None:
-        missing.append('сюрпризов по отчётам')
+        missing.append('earnings surprises')
     if yoy is None:
-        missing.append('тренда маржи YoY')
-    if not (tp is not None and fp is not None and fp > 0):
-        missing.append('ревизий (trailing→forward P/E)')
-    confirmers = 3 - len(missing)
+        missing.append('margin trend')
+    confirmers = 2 - len(missing)
 
     # Катализатор: показываем факт из summary_for без «нет катализатора».
     cat = catalyst or {}
@@ -205,11 +205,17 @@ def build_simple_card(e, catalyst=None):
     else:
         facts.append('Оценка: нет данных')
 
-    if confirmers == 3:
+    if confirmers == 2:
         facts.append('Качество данных: полные данные по отчётам '
-                     '(сюрпризы, маржа, ревизии).')
+                     '(сюрпризы, маржа).')
     elif missing:
-        facts.append('Данные неполные: нет {}'.format(', '.join(missing)))
+        joined = ', '.join(missing[:-1])
+        if len(missing) > 1:
+            joined += ' и ' + missing[-1]
+        else:
+            joined = missing[-1]
+        facts.append('Данные неполные: текущие источники не загрузили '
+                     '{}.'.format(joined))
     else:
         facts.append('Качество данных: нет данных по отчётам.')
 

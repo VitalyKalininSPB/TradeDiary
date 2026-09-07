@@ -310,5 +310,46 @@ class YoYTest(unittest.TestCase):
         self.assertIsNone(q2['revenue']['qoq_pct'])
 
 
+class NetMarginYoyFallbackTest(unittest.TestCase):
+    """Детерминированный fallback net_margin_yoy из SEC Company Facts."""
+
+    @staticmethod
+    def _doc(rev, prev_ni, cur_ni):
+        gaap = {'RevenueFromContractWithCustomerExcludingAssessedTax':
+                flow_quarterly(rev, 2024, prev=True)
+                + flow_quarterly(rev, 2025),
+                'NetIncomeLoss': flow_quarterly(prev_ni, 2024, prev=True)
+                + flow_quarterly(cur_ni, 2025)}
+        return facts_doc(gaap)
+
+    def test_yoy_pp_change(self):
+        # 2024: NI/Rev = [10%, 15%, 20%, 25%]; 2025: [12%, 18%, 24%, 30%].
+        # Q4-2025 margin 30% vs Q4-2024 25% -> +5 п.п.
+        doc = self._doc([1000] * 4, [100, 150, 200, 250],
+                        [120, 180, 240, 300])
+        from earnings_snapshot import net_margin_yoy_from_facts
+        self.assertAlmostEqual(net_margin_yoy_from_facts(doc), 5.0, places=3)
+
+    def test_negative_margin_still_computes(self):
+        # 2024 Q4 margin -20%; 2025 Q4 margin -5% -> +15 п.п.
+        doc = self._doc([1000] * 4, [100, 150, 200, -200],
+                        [120, 180, 240, -50])
+        from earnings_snapshot import net_margin_yoy_from_facts
+        self.assertAlmostEqual(net_margin_yoy_from_facts(doc), 15.0, places=3)
+
+    def test_no_comparable_quarter_returns_none(self):
+        # Только один год в данных — нет того же квартала прошлого года.
+        gaap = {'RevenueFromContractWithCustomerExcludingAssessedTax':
+                flow_quarterly([1000, 1000, 1000, 1000], 2025),
+                'NetIncomeLoss': flow_quarterly(
+                    [100, 150, 200, 250], 2025)}
+        from earnings_snapshot import net_margin_yoy_from_facts
+        self.assertIsNone(net_margin_yoy_from_facts(facts_doc(gaap)))
+
+    def test_empty_facts_returns_none(self):
+        from earnings_snapshot import net_margin_yoy_from_facts
+        self.assertIsNone(net_margin_yoy_from_facts({}))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,8 +12,9 @@ RU-строки и данные для 4-столбцовых графиков (
 
 import turnaround
 
-# Порог для направления ожиданий: разрыв trailing↔forward P/E в ±3%.
-_REV_THRESHOLD = 0.03
+# Направление ожиданий аналитиков (revision) НЕ выводится из разрыва
+# trailing↔forward P/E — это хрупкий proxy. Считается позже напрямую из
+# временного ряда analyst estimates (пока не реализовано → None).
 
 _SHORT_LOW = 5.0      # < 5% float — низкий
 _SHORT_HIGH = 15.0    # > 15% float — высокий
@@ -42,28 +43,6 @@ def _fmt_pe(v):
     return '{:.1f}×'.format(v)
 
 
-def _revision_dir(tp, fp):
-    """Направление ожиданий из разрыва P/E: forward < trailing => рост EPS."""
-    if tp is None or fp is None or fp <= 0:
-        return None
-    implied = tp / fp - 1.0
-    if implied > _REV_THRESHOLD:
-        return 'up'
-    if implied < -_REV_THRESHOLD:
-        return 'down'
-    return 'flat'
-
-
-def _status(above, revision):
-    """Статус из матрицы: Рост выше/ниже peers × ожидания растут/падают."""
-    if above is None or revision is None:
-        return None
-    improving = revision in ('up', 'flat')
-    if above:
-        return 'Рост подтверждается' if improving else 'Рост под вопросом'
-    return 'Восстановление возможно' if improving else 'Замедление прибыли'
-
-
 def build_recommendation(e):
     feg = e.get('eps_growth')                       # форвард, компания
     sfeg = e.get('sector_median_eps_growth')        # форвард, медиана сектора
@@ -79,10 +58,9 @@ def build_recommendation(e):
     rel = (feg - sfeg) if (feg is not None and sfeg is not None) else None
     above = None if rel is None else rel >= 0
 
-    revision = _revision_dir(tp, fp)
-    status = _status(above, revision)
-    rev_txt = {'up': '↑ растут', 'flat': '→ стабильны',
-               'down': '↓ снижаются'}.get(revision, '-')
+    # revision/status отложены до реализации analyst-estimates time series.
+    revision = None
+    status = None
 
     # --------------------------- свёрнутая сводка
     summary = [
@@ -90,17 +68,14 @@ def build_recommendation(e):
         'Похожие компании: {}'.format(_fmt_pct(sfeg) or '-'),
         'Относительный рост: {}'.format(
             '{:+.1f} п.п.'.format(rel) if rel is not None else '-'),
-        'Ожидания аналитиков: {}'.format(rev_txt),
-        'Статус: {}'.format(status or '-'),
     ]
 
     # --------------------------- раскрытая механика
     mech = []
-    implied = None
     if tp is not None and fp is not None and fp > 0:
-        implied = (tp / fp - 1.0) * 100.0
         mech.append('P/E сейчас: {} → Forward P/E: {} ({:+.0f}% к текущему)'
-                    .format(_fmt_pe(tp), _fmt_pe(fp), implied))
+                    .format(_fmt_pe(tp), _fmt_pe(fp),
+                            (tp / fp - 1.0) * 100.0))
     elif tp is not None or fp is not None:
         mech.append('P/E сейчас: {} · Forward P/E: {}'.format(
             _fmt_pe(tp) or '-', _fmt_pe(fp) or '-'))
@@ -118,15 +93,6 @@ def build_recommendation(e):
             peers_line += ' · компания дешевле {:.0f}% компаний сектора'.format(
                 100 - pct_pe)
         mech.append(peers_line)
-    if revision is not None:
-        rev_w = {'up': 'растут', 'flat': 'стабильны',
-                 'down': 'снижаются'}[revision]
-        if implied is not None:
-            mech.append('Revisions (оценка): ожидания {} — рынок закладывает '
-                        '{:+.0f}% к EPS'.format(rev_w, implied))
-        else:
-            mech.append('Revisions (оценка): ожидания {}'.format(rev_w))
-    mech.append('Статус: {}'.format(status or '-'))
 
     pe_bars = [('Сектор сейчас', stp), ('Компания сейчас', tp),
                ('Сектор форвардный', sfp), ('Компания форвардная', fp)]

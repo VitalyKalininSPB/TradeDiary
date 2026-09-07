@@ -881,6 +881,51 @@ def _overall_status(coverage):
     return 'insufficient'
 
 
+def net_margin_yoy_from_facts(facts_doc):
+    """Net margin YoY (в п.п.) из Company Facts — детерминированный fallback.
+
+    Берёт последний квартал с полными данными (revenue, net_income) и тот же
+    квартал прошлого года: net_margin = net_income / revenue, разность в
+    процентных пунктах. None, если кварталы несопоставимы.
+    """
+    gau = (facts_doc or {}).get('facts', {}).get('us-gaap', {})
+    if not gau:
+        return None
+    flow_entries = []
+    for tags, unit in ((_FLOW_CONCEPTS['revenue'], 'USD'),
+                       (_FLOW_CONCEPTS['net_income'], 'USD')):
+        for tag in tags:
+            flow_entries += _tag_entries(gau, tag, unit)
+    all_ends, end_meta, buckets, fy_by_end = _culc_fiscal_grid(flow_entries)
+    if not all_ends:
+        return None
+    grid = (all_ends, end_meta, buckets, fy_by_end)
+    picked_r = _pick_flow_tag(gau, _FLOW_CONCEPTS['revenue'], 'USD', grid)
+    picked_n = _pick_flow_tag(gau, _FLOW_CONCEPTS['net_income'], 'USD', grid)
+    if picked_r is None or picked_n is None:
+        return None
+    rev_series = picked_r[2]
+    ni_series = picked_n[2]
+    if rev_series is None or ni_series is None:
+        return None
+    for k in reversed(sorted(set(end_meta.values()))):
+        fy, qi = k
+        r = (rev_series.get(k) or {}).get('value')
+        n = (ni_series.get(k) or {}).get('value')
+        if r is None or n is None or r == 0:
+            continue
+        yk = (fy - 1, qi)
+        rp = (rev_series.get(yk) or {}).get('value')
+        np_ = (ni_series.get(yk) or {}).get('value')
+        if rp is None or np_ is None or rp == 0:
+            continue
+        cur_m = n / r
+        prev_m = np_ / rp
+        if cur_m == cur_m and prev_m == prev_m:
+            return (cur_m - prev_m) * 100.0
+    return None
+
+
 # --------------------------------------------------------------------------
 # Orchestration (network + cache)
 # --------------------------------------------------------------------------
@@ -916,6 +961,42 @@ def build_earnings_snapshot(ticker, use_cache=True):
             print('earnings_snapshot: failed to cache snapshot: {}'
                   .format(e))
     return result
+
+
+def net_margin_yoy_for(ticker, use_cache=True):
+    """Net margin YoY (в п.п.) из SEC Company Facts (кэш 24ч).
+
+    Возвращает (value, reason): value — None при неудаче; reason None при
+    успехе, иначе один из: source_empty (тикер не найден в SEC),
+    http_error (факты недоступны), calculation_unavailable (нет сопоставимых
+    кварталов).
+    """
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return None, 'source_empty'
+    if use_cache:
+        cached = _load_cached('margin_yoy:{}'.format(ticker), CACHE_TTL_HOURS)
+        if cached is not None:
+            try:
+                return json.loads(cached)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    cik = cik_for_ticker(ticker)
+    if not cik:
+        return None, 'source_empty'
+    facts = fetch_company_facts(cik)
+    if facts is None:
+        return None, 'http_error'
+    value = net_margin_yoy_from_facts(facts)
+    reason = None if value is not None else 'calculation_unavailable'
+    if use_cache:
+        try:
+            _save_cached('margin_yoy:{}'.format(ticker),
+                         json.dumps([value, reason]))
+        except Exception as e:  # noqa: BLE001 - cache best-effort
+            print('earnings_snapshot: failed to cache margin_yoy: {}'
+                  .format(e))
+    return value, reason
 
 
 def main():
