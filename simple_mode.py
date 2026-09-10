@@ -53,6 +53,95 @@ _ACTION = {
                'появления данных.',
 }
 
+# Пороги «сильного положительного отчётного подтверждения» (для Watchlist-CTA).
+_STRONG_SURPRISE = 5.0   # % — средний сюрприз по отчётам >= → сильное подтверждение
+_STRONG_MARGIN = 3.0     # п.п. — рост net margin YoY >= → сильное подтверждение
+
+# Базы (триггеры) рекомендации «Открыть Details сейчас» для Watchlist.
+_WATCHLIST_TRIGGER_RU = {
+    'eps_outperformance': 'ожидаемый рост EPS заметно опережает peers/сектор',
+    'growth_valuation': 'ожидаемый рост EPS опережает peers/сектор при '
+                        'valuation не хуже sector benchmark',
+    'earnings_signal': 'сильное положительное отчётное подтверждение',
+    'signal_conflict': 'существенное противоречие между ключевыми '
+                       'количественными сигналами',
+}
+
+_WATCHLIST_ACTION_NO_TRIGGER = (
+    'Действие: Watchlist. Открыть Details при техническом сетапе или после '
+    'нового отчётного/количественного подтверждения.')
+
+_WATCHLIST_ACTION_TRIGGERED = (
+    'Действие: открыть Details сейчас — {}. '
+    'Проверить устойчивость прогноза, revisions, маржу, cash flow и прямых '
+    'peers.')
+
+
+def _eps_outperform(feg, sfeg):
+    """Существенное превосходство EPS-прогноза над benchmark.
+
+    benchmark — медиана прямых peers, при недостаточных peer-данных — сектор
+    (в этой модели benchmarks идут из sector_median_*, единой медианы
+    сектора/peers). Сравнивается один и тот же прогнозный период.
+    Существенное превосходство: EPS growth >= benchmark + 2.0 п.п. И
+    >= benchmark * 1.20. Если benchmark <= 0%, относительный (мультипликативный)
+    порог не применяется — только абсолютный +2.0 п.п., и сигнал помечается как
+    «низкая/отрицательная база — требуется проверка в Details».
+    Возвращает (outperform, low_base).
+    """
+    if feg is None or sfeg is None:
+        return False, False
+    low_base = sfeg <= 0.0
+    abs_ok = feg >= sfeg + 2.0
+    if low_base:
+        return abs_ok, True
+    rel_ok = feg >= sfeg * 1.20
+    return (abs_ok and rel_ok), False
+
+
+def _watchlist_trigger(feg, sfeg, fp, sfp, sa, yoy, positive_eps, expensive):
+    """Возвращает (trigger_key, reason_ru) для Watchlist-CTA или None.
+
+    Приоритет сравнения — прямые peers; если их данных нет — сектор (в этой
+    модели benchmarks идут из sector_median_*, единой медианы сектора/peers).
+    Один из сигналов:
+      1) EPS-прогноз существенно выше peers/сектора;
+      2) valuation не хуже peers/сектора при сопоставимом/более высоком росте EPS;
+      3) сильное положительное отчётное подтверждение;
+      4) существенное противоречие между ключевыми количественными сигналами.
+    """
+    rel = _rel(feg, sfeg)
+    growth_ok = rel is not None and rel >= 0.0
+
+    # 1) существенное преимущество по EPS-прогнозу
+    outperform, low_base = _eps_outperform(feg, sfeg)
+    if outperform:
+        reason = _WATCHLIST_TRIGGER_RU['eps_outperformance']
+        if low_base:
+            reason += ' (низкая/отрицательная база — требуется проверка в Details)'
+        return ('eps_outperformance', reason)
+
+    # 2) рост не хуже И valuation не хуже (не дороже) peers/сектора
+    if growth_ok and not expensive:
+        return ('growth_valuation', _WATCHLIST_TRIGGER_RU['growth_valuation'])
+
+    # 3) сильное положительное отчётное подтверждение
+    strong_earnings = (
+        (sa is not None and sa >= _STRONG_SURPRISE)
+        or (yoy is not None and yoy >= _STRONG_MARGIN))
+    if strong_earnings:
+        return ('earnings_signal', _WATCHLIST_TRIGGER_RU['earnings_signal'])
+
+    # 4) существенное противоречие между ключевыми сигналами
+    conflict = (
+        (positive_eps and expensive)
+        or (growth_ok and sa is not None and sa < 0)
+        or (growth_ok and yoy is not None and yoy < 0))
+    if conflict:
+        return ('signal_conflict', _WATCHLIST_TRIGGER_RU['signal_conflict'])
+
+    return None
+
 
 def _num(v):
     if v is None or isinstance(v, bool):
@@ -182,6 +271,17 @@ def build_simple_card(e, catalyst=None):
     else:
         verdict = 'watchlist'
 
+    # Действие. Для Watchlist: если есть количественный сигнал — предложить
+    # открыть Details сейчас; иначе — ждать тех. сетап/новый катализатор.
+    action = _ACTION[verdict]
+    watchlist_trigger = None
+    if verdict == 'watchlist':
+        watchlist_trigger = _watchlist_trigger(
+            feg, sfeg, fp, sfp, sa, yoy, positive_eps, expensive)
+        if watchlist_trigger:
+            action = _WATCHLIST_ACTION_TRIGGERED.format(
+                watchlist_trigger[1])
+
     # Ключевые факты (порядок: преимущество, оценка, качество данных).
     facts = []
     if feg is not None and sfeg is not None:
@@ -237,5 +337,6 @@ def build_simple_card(e, catalyst=None):
         'catalyst': cat_line,
         'last_earnings': last_line,
         'next_earnings': next_line,
-        'action': _ACTION[verdict],
+        'action': action,
+        'watchlist_trigger': watchlist_trigger,
     }

@@ -80,6 +80,63 @@ def _install_table_copy(table):
     shortcut.activated.connect(_copy)
 
 
+def _copy_table_all(table):
+    """Скопировать всю таблицу (шапка + строки) в буфер как пробельный текст."""
+    _SEP = '  '
+    def _copy():
+        rows = []
+        headers = [table.horizontalHeaderItem(c).text()
+                   if table.horizontalHeaderItem(c) else '' 
+                   for c in range(table.columnCount())]
+        rows.append(_SEP.join(headers))
+        for r in range(table.rowCount()):
+            rows.append(_SEP.join(
+                table.item(r, c).text() if table.item(r, c) else ''
+                for c in range(table.columnCount())))
+        QtWidgets.QApplication.clipboard().setText('\n'.join(rows))
+
+    return _copy
+
+
+def _copy_table_button(table):
+    """Кнопка «Копировать таблицу» (вся таблица в буфер обмена как текст)."""
+    btn = QtWidgets.QPushButton('Копировать таблицу')
+    btn.setStyleSheet(
+        'QPushButton {{ background: #26272d; color: {}; border: 1px solid '
+        '{}; border-radius: 4px; padding: 3px 10px; }}'
+        'QPushButton:hover {{ background: #30313a; }}'.format(_TXT, _GRID))
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.clicked.connect(_copy_table_all(table))
+    return btn
+
+
+def watchlist_contains(ticker):
+    """Уже ли тикер в watchlist (для состояния кнопки)."""
+    if not ticker:
+        return False
+    from watchlist import find
+    return find(ticker) is not None
+
+
+def add_to_watchlist_safe(ticker):
+    """Идемпотентно добавить тикер в watchlist.
+
+    Возвращает (ok, message): ok=False и понятное сообщение при ошибке
+    сохранения или пустом тикере. Повторное добавление не создаёт дубликат
+    (watchlist.add обновляет существующую запись).
+    """
+    if not (ticker or '').strip():
+        return False, 'Не указан тикер.'
+    from watchlist import add as watchlist_add
+    try:
+        res = watchlist_add(ticker)
+    except (OSError, ValueError) as exc:
+        return False, 'Не удалось сохранить watchlist: {}'.format(exc)
+    if res == 'empty':
+        return False, 'Не указан тикер.'
+    return True, 'Added to Watchlist'
+
+
 # Блоки статуса данных (ключ data_status → подпись в UI).
 _DATA_BLOCKS = [
     ('pe_eps', 'Forward P/E / EPS estimates'),
@@ -291,6 +348,8 @@ class EarningsPanel(QtWidgets.QWidget):
         self._expandBtn.setVisible(False)
         self._expandBtn.clicked.connect(self._toggle_table)
         row.addWidget(self._expandBtn)
+        self._copyBtn = _copy_table_button(self._table)
+        row.addWidget(self._copyBtn)
         row.addStretch(1)
         refresh = QtWidgets.QPushButton('Обновить')
         refresh.clicked.connect(lambda: self.load(self._ticker))
@@ -649,6 +708,18 @@ class RecommendationDialog(QtWidgets.QDialog):
         self.detailsButton.setCheckable(True)
         self.detailsButton.clicked.connect(self._toggle_details)
         row.addWidget(self.detailsButton)
+        self._ticker = e.get('ticker') or ''
+        self._watchlistButton = QtWidgets.QPushButton()
+        self._watchlistButton.setStyleSheet(
+            'QPushButton { background: #26272d; color: ' + _TXT
+            + '; border: 1px solid ' + _GRID + '; border-radius: 4px; '
+            'padding: 3px 10px; }'
+            'QPushButton:hover { background: #30313a; }'
+            'QPushButton:disabled { color: ' + _MUTED + '; }')
+        self._watchlistButton.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._watchlistButton.clicked.connect(self._add_to_watchlist)
+        row.addWidget(self._watchlistButton)
+        self._refresh_watchlist_button()
         row.addStretch(1)
         close = QtWidgets.QPushButton('Close')
         close.clicked.connect(self.close)
@@ -683,6 +754,21 @@ class RecommendationDialog(QtWidgets.QDialog):
     def _toggle_details(self):
         self._details_shown = not self._details_shown
         self._apply_visible()
+
+    def _refresh_watchlist_button(self):
+        present = watchlist_contains(self._ticker)
+        self._watchlistButton.setText(
+            'In Watchlist' if present else 'Add to Watchlist')
+        self._watchlistButton.setEnabled(not present)
+
+    def _add_to_watchlist(self):
+        ok, msg = add_to_watchlist_safe(self._ticker)
+        if not ok:
+            QtWidgets.QMessageBox.critical(
+                self, 'Watchlist', msg)
+            return
+        QtWidgets.QMessageBox.information(self, 'Watchlist', msg)
+        self._refresh_watchlist_button()
 
     def _on_mode_changed(self, on):
         if on == self._simple:
@@ -743,39 +829,48 @@ class RecommendationDialog(QtWidgets.QDialog):
         return tab
 
     def _build_bridge_tab(self, e):
-        """Recovery Layout: TTM-убыток → мост «факт → ожидание» вместо графика."""
-        ticker = e.get('ticker') or ''
-        sector = e.get('sector') or 'сектора'
-        margin = e.get('net_margin')
+        """Recovery Layout: TTM-убыток → количественная сводка вкладки P/E.
+
+        Без диагноза о происхождении убытка: только измеримые входы
+        (forward P/E vs peers, наличие прогноза EPS) и вердикт Quant.
+        """
         fp = e.get('forward_pe')
         sfp = e.get('sector_median_pe')
+        feg = e.get('eps_growth')
+        card = simple_mode.build_simple_card(e)
 
-        gap = (fp / sfp - 1.0) * 100.0 if (fp is not None and sfp) else None
-        if gap is None:
-            verdict = 'по доступной оценке'
-        elif abs(gap) <= _PE_ON_PAR_PCT:
-            verdict = 'на уровне peers'
-        elif fp < sfp:
-            verdict = 'дешевле peers на {:.0f}%'.format(-gap)
+        if card['verdict'] == 'skip':
+            status = 'Skip — нет наблюдаемого quantitative-преимущества'
+            action = 'закрыть карточку и перейти к следующему тикеру.'
         else:
-            verdict = 'дороже peers на {:.0f}%'.format(gap)
+            status = card['verdict_ru']
+            action = card['action']
+            if action.startswith('Действие: '):
+                action = action[len('Действие: '):]
+
+        if fp is not None and sfp is not None:
+            basis = 'forward P/E {} против {} у peers'.format(
+                _fmt_pe(fp), _fmt_pe(sfp))
+        elif fp is not None:
+            basis = 'forward P/E {}'.format(_fmt_pe(fp))
+        else:
+            basis = 'forward P/E недоступен'
+        if feg is not None:
+            basis += '; forecast EPS-growth {:+.1f}%'.format(feg)
+        else:
+            basis += '; forecast EPS-growth недоступен'
+            if card['expensive']:
+                basis += (', поэтому премиальная оценка не подтверждена '
+                          'прогнозом роста')
+        basis += '.'
 
         parts = [
-            '<b>Фактическая прибыльность (TTM)</b>',
-            'Net margin: {:+.1f}%'.format(margin),
-            'Trailing P/E: не применимо — TTM-убыток',
-            '',
-            '<b>Ожидаемая оценка (Forward)</b>',
+            '<b>Статус:</b> {}'.format(status),
+            '<b>Основание:</b> {}'.format(basis),
+            '<b>Примечание:</b> TTM-убыток делает trailing P/E неприменимым; '
+            'причина убытка не устанавливается Quant-данными.',
+            '<b>Действие:</b> {}'.format(action),
         ]
-        if fp is not None:
-            parts.append('{} Forward P/E: {:.1f}×'.format(ticker, fp))
-        if sfp is not None:
-            parts.append('{} peers Forward P/E: {:.1f}×'.format(sector, sfp))
-        parts.append('Вывод: рынок оценивает ожидаемое восстановление '
-                     '{} {}'.format(ticker, verdict))
-        parts.append('')
-        parts.append('<span style="color:#e57373;">Риск: вся оценка '
-                     'опирается на прогноз возврата к прибыли.</span>')
 
         tab = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(tab)
@@ -920,6 +1015,12 @@ class RecommendationDialog(QtWidgets.QDialog):
         table.setFixedHeight(36 + 28 * len(dyn['rows']))
         lay.addWidget(table)
 
+        row = QtWidgets.QHBoxLayout()
+        copy_btn = _copy_table_button(table)
+        row.addWidget(copy_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+
         if dyn['earnings_days'] is not None:
             if dyn['earnings_days'] >= 0:
                 rep = 'Следующая проверка: квартальный отчёт через {} дней.'.format(
@@ -997,33 +1098,44 @@ class RecommendationDialog(QtWidgets.QDialog):
         if sfp is not None:
             lines.append('Сектор форвардный (медиана): {:.1f}×.'.format(sfp))
         if tp is not None and fp is not None and fp > 0:
-            lines.append('Разрыв trailing→forward {:+.0f}%: рынок закладывает '
-                         'рост/падение EPS.'.format((tp / fp - 1.0) * 100.0))
+            gap = (tp / fp - 1.0) * 100.0
+            if tp > fp:
+                lines.append('Forward P/E {:.1f}× ниже trailing P/E {:.1f}×.'
+                             .format(fp, tp))
+                lines.append('Это соответствует ожидаемому росту EPS '
+                             'примерно на {:.0f}% относительно последних '
+                             '12 месяцев.'.format(gap))
+            elif tp < fp:
+                lines.append('Forward P/E {:.1f}× выше trailing P/E '
+                             '{:.1f}×.'.format(fp, tp))
+                lines.append('Это соответствует ожидаемому падению EPS '
+                             'примерно на {:.0f}% относительно последних '
+                             '12 месяцев.'.format(-gap))
+            else:
+                lines.append('Forward P/E {:.1f}× равен trailing P/E {:.1f}× '
+                             '— рынок не закладывает изменения EPS.'
+                             .format(fp, tp))
         if fp is not None and sfp is not None:
             gap = (fp / sfp - 1.0) * 100.0
             if abs(gap) <= _PE_ON_PAR_PCT:
-                rel_txt = 'Forward P/E: на уровне peers ({} vs {}).'.format(
-                    _fmt_pe(fp), _fmt_pe(sfp))
+                rel_txt = 'Forward P/E на уровне секторной медианы: {} против {}.' \
+                    .format(_fmt_pe(fp), _fmt_pe(sfp))
             elif fp < sfp:
-                rel_txt = ('Forward P/E: дешевле peers на {:.0f}% '
-                           '({} vs {}).'.format(-gap, _fmt_pe(fp),
-                                                _fmt_pe(sfp)))
+                rel_txt = ('Forward P/E на {:.0f}% ниже секторной медианы: '
+                           '{} против {}.'.format(-gap, _fmt_pe(fp),
+                                                  _fmt_pe(sfp)))
             else:
-                rel_txt = ('Forward P/E: дороже peers на {:.0f}% '
-                           '({} vs {}).'.format(gap, _fmt_pe(fp),
-                                                _fmt_pe(sfp)))
+                rel_txt = ('Forward P/E на {:.0f}% выше секторной медианы: '
+                           '{} против {}.'.format(gap, _fmt_pe(fp),
+                                                  _fmt_pe(sfp)))
             lines.append(rel_txt)
         if pct is not None:
             if pct > _PCT_HIGH:
-                pos_txt = ('Оценка: дороже {:.0f}% компаний сектора '
-                           '(дешевле {:.0f}%).'.format(pct, 100 - pct))
+                lines.append('Оценка: дороже {:.0f}% компаний сектора '
+                             '(дешевле {:.0f}%).'.format(pct, 100 - pct))
             elif pct < _PCT_LOW:
-                pos_txt = ('Оценка: дешевле {:.0f}% компаний сектора '
-                           '(дороже {:.0f}%).'.format(100 - pct, pct))
-            else:
-                pos_txt = 'Оценка: на уровне медианы сектора — не дороже ' \
-                          'и не дешевле большинства peers.'
-            lines.append(pos_txt)
+                lines.append('Оценка: дешевле {:.0f}% компаний сектора '
+                             '(дороже {:.0f}%).'.format(100 - pct, pct))
         if not lines:
             lines.append('Нет данных по P/E.')
         return '\n'.join(lines)

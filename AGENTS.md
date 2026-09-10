@@ -153,6 +153,23 @@ Analysis и остальные экраны не развиваем, не пер
   (сокращённый row ручного анализа тикера не содержит `net_margin`, `roic`,
   `debt_equity`, `company_score`, `label`, `rank`, `flags`, `contribs`,
   `relative_profitability`, `momentum`). Полный скор/ранг не имитируется.
+- **Watchlist-CTA «Открыть Details сейчас»**: для нейтрального Watchlist,
+  если есть количественный сигнал, рекомендация открыть существующий Details
+  (это НЕ Buy-сигнал). Триггеры в `_watchlist_trigger` (simple_mode.py),
+  результат в `card['action']` и `card['watchlist_trigger']`:
+  1) **существенное превосходство EPS** `_eps_outperform`: benchmark — медиана
+     прямых peers (в модели — `sector_median_eps_growth`), сравнивается один
+     период: `feg >= benchmark + 2.0` п.п. И `feg >= benchmark * 1.20`. Если
+     benchmark <= 0% — только абсолютный `+2.0` п.п., сигнал помечается
+     «низкая/отрицательная база — требуется проверка в Details»;
+  2) рост не хуже (`rel >= 0`) И valuation не дороже (не `expensive`);
+  3) сильное отчётное подтверждение: `surprise_avg >= +5%` ИЛИ
+     `net_margin_yoy >= +3` п.п.;
+  4) существенное противоречие (сильный рост + дорого, или рост + отрицательные
+     сюрпризы/маржа).
+  Если ни один не сработал — прежняя рекомендация (ждать тех. сетап / новый
+  отчёт / катализатор). Вердикт Watchlist и UI не меняются (только текст
+  action и логика CTA).
 - Катализатор: `catalyst.summary_for(ticker)`; 0 событий → «Катализатор: не
   обнаружен системой» (НЕ «нет катализатора»). Число событий и ближайшая
   дата показываются строкой.
@@ -165,6 +182,12 @@ Analysis и остальные экраны не развиваем, не пер
   тумблер `⚡ Simple Mode` в правом верхнем углу главного окна (main.py),
   применяется ко всей карточке тикера (RecommendationDialog и
   RecommendationPanel), запоминается между запусками.
+- **Кнопка «Add to Watchlist»** в RecommendationDialog (экран анализа компании):
+  идемпотентное добавление в `watchlist.json` через `add_to_watchlist_safe`
+  (recommendation_panel.py). Если тикер уже в watchlist — кнопка disabled с
+  текстом «In Watchlist» (`watchlist_contains`). Успех → сообщение
+  «Added to Watchlist»; ошибка сохранения → понятное сообщение.
+  Тесты: `tests/test_watchlist_add.py`.
 
 ## Карта модулей
 
