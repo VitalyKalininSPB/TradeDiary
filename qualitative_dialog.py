@@ -8,6 +8,19 @@ def _esc_html(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+def _strip_body(html):
+    """Вырезать содержимое <body>…</body> из полного HTML (иначе вернуть as-is)."""
+    import re
+    m = re.search(r'<body[^>]*>(.*)</body>', html or '', re.S | re.I)
+    return m.group(1) if m else (html or '')
+
+
+def _html_has_text(html):
+    """Есть ли в HTML реальный текст (не только теги/пустая обёртка)."""
+    import re
+    return bool(re.sub(r'<[^>]+>', '', html or '').strip())
+
+
 # Картинка козы. Ищем в repo `assets/`, затем — пользовательский Downloads.
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 _GOAT_CANDIDATES = [
@@ -393,6 +406,7 @@ class QualitativeAssessmentDialog(QDialog):
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
         self._quality = ''
+        self._quality_html = ''
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
@@ -408,6 +422,10 @@ class QualitativeAssessmentDialog(QDialog):
         self.nextButton.setEnabled(False)
         self.notesButton.clicked.connect(self._open_notes)
         self.notesButton.setEnabled(False)
+        self.qualityButton.clicked.connect(self._open_quality)
+        self.qualityButton.setEnabled(False)
+        self.eventsButton.clicked.connect(self._open_events)
+        self.eventsButton.setEnabled(False)
         self.starRating.ratingChanged.connect(self._on_rating_changed)
         self.starRating.setEnabled(False)
 
@@ -439,9 +457,15 @@ class QualitativeAssessmentDialog(QDialog):
         row = QHBoxLayout()
         self.notesButton = QPushButton('Notes')
         self.notesButton.setMinimumWidth(80)
+        self.qualityButton = QPushButton('Quality result')
+        self.qualityButton.setMinimumWidth(120)
+        self.eventsButton = QPushButton('Events')
+        self.eventsButton.setMinimumWidth(80)
         rating_lbl = QLabel('Rating (0-5):')
         self.starRating = StarRating()
         row.addWidget(self.notesButton)
+        row.addWidget(self.qualityButton)
+        row.addWidget(self.eventsButton)
         row.addWidget(rating_lbl)
         row.addWidget(self.starRating)
         row.addStretch(1)
@@ -487,21 +511,25 @@ class QualitativeAssessmentDialog(QDialog):
         if not ticker:
             return
         import datetime
+        from watchlist import find as watchlist_find
         from watchlist import add as watchlist_add
+        existing = watchlist_find(ticker) or {}
+        snap = dict(existing.get('snapshot') or {})
         ratings = [r for r in self._ratings if r > 0]
         qual = (sum(ratings) / len(ratings)) if ratings else 0.0
-        snapshot = {'qual': round(qual, 2),
-                    'date': datetime.date.today().isoformat()}
-        if self._quality:
-            snapshot['quality'] = self._quality
+        snap['qual'] = round(qual, 2)
+        snap['date'] = datetime.date.today().isoformat()
+        snap['quality'] = self._report_text()
+        if self._quality_html:
+            snap['quality_html'] = self._quality_html
         from watchlist_dialog import WatchlistEntryDialog
-        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snapshot,
+        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snap,
                                    parent=self)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
         res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'],
-                            snapshot=snapshot)
+                            snapshot=snap)
         self.beginButton.setText('Added to Watchlist')
         self.beginButton.setEnabled(False)
         QtWidgets.QMessageBox.information(
@@ -517,11 +545,14 @@ class QualitativeAssessmentDialog(QDialog):
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
         self._quality = ''
+        self._quality_html = ''
         self._assessment_started = True
         self.beginButton.setText('Add to Watchlist')
         self.beginButton.setEnabled(False)
         self.nextButton.setEnabled(True)
         self.notesButton.setEnabled(True)
+        self.qualityButton.setEnabled(True)
+        self.eventsButton.setEnabled(True)
         self.starRating.setEnabled(True)
         self._warn_if_no_quant()
         self._next_stage()
@@ -559,12 +590,52 @@ class QualitativeAssessmentDialog(QDialog):
         if dlg.exec() == QDialog.Accepted:
             self._notes[self._current_stage] = editor.toPlainText()
 
-    def _report_text(self):
-        """Текстовый отчёт оценки (сохраняется в snapshot Watchlist).
+    def _open_events(self):
+        """Менеджер катализаторов (Events) для тикера — доступен на любом этапе."""
+        if not self._ticker:
+            return
+        from catalyst_dialog import CatalystDialog
+        dlg = CatalystDialog(self, ticker=self._ticker)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
-        Генерируется приложением, а не извлекается из браузера: копировать
-        из webview ничего не нужно.
+    def _open_quality(self):
+        """Вставка тезиса Quality Assessment с сохранением форматирования (rich text).
+
+        По умолчанию ответ забирается из WebView автоматически; эта кнопка —
+        опция, если ответ получен из внешнего браузера.
         """
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Quality Assessment result - {}'.format(
+            self._ticker or ''))
+        dlg.setMinimumSize(620, 420)
+        lay = QVBoxLayout(dlg)
+        hint = QLabel('Вставь сюда ответ (Thesis Validation) — форматирование '
+                      'сохранится. Пусто = вернуть авто-захват из WebView.')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: #9aa0aa; font-size: 12px;')
+        lay.addWidget(hint)
+        editor = QTextEdit()
+        editor.setAcceptRichText(True)
+        editor.setHtml(self._quality_html or '')
+        lay.addWidget(editor, 1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        ok = QPushButton('OK')
+        ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(ok)
+        lay.addLayout(btn_row)
+        if dlg.exec() == QDialog.Accepted:
+            text = editor.toPlainText().strip()
+            if text:
+                self._quality_html = editor.toHtml()
+                self._quality = text
+            else:
+                self._quality_html = ''
+                self._quality = ''
+
+    def _report_text(self):
+        """Текстовый отчёт оценки (сохраняется в snapshot Watchlist)."""
         lines = ['Ticker: {}'.format(self._ticker or 'stock')]
         total = 0
         for i, name in enumerate(STAGES):
@@ -579,6 +650,10 @@ class QualitativeAssessmentDialog(QDialog):
         lines.append('Average: {:.2f} / 5'.format(avg))
         lines.append('Total: {} / {}'.format(
             total, len(STAGES) * StarRating.MAX_STARS))
+        if self._quality:
+            lines.append('')
+            lines.append('Quality Assessment:')
+            lines.append(self._quality)
         return '\n'.join(lines)
 
     def _stats_html(self):
@@ -596,6 +671,13 @@ class QualitativeAssessmentDialog(QDialog):
         body = ''.join(rows)
         avg = total / len(STAGES) if STAGES else 0
         ticker = _esc_html(self._ticker or 'stock')
+        quality_section = ''
+        if self._quality_html:
+            inner = _strip_body(self._quality_html)
+            quality_section = (
+                '<h2>Quality Assessment</h2>'
+                '<div style="border:1px solid #43464f;padding:10px;'
+                'border-radius:6px;">{}</div>'.format(inner))
         return (
             '<!DOCTYPE html><html><head><meta charset="utf-8">'
             '<style>body{{background:#1e1f24;color:#dcdce0;font-family:Sans;'
@@ -610,15 +692,19 @@ class QualitativeAssessmentDialog(QDialog):
             '{}</table>'
             '<p>Average: <b>{:.2f} / 5</b></p>'
             '<p>Total: <b>{}</b> / {}</p>'
+            '{}'
             '</body></html>'
         ).format(ticker, body, avg, total,
-                 len(STAGES) * StarRating.MAX_STARS)
+                 len(STAGES) * StarRating.MAX_STARS, quality_section)
 
     def _next_stage(self):
+        if self._current_stage >= len(STAGES):
+            self.accept()
+            return
         self._current_stage += 1
         if self._current_stage >= len(STAGES):
-            self.nextButton.setEnabled(False)
-            self.nextButton.setText('Next')
+            self.nextButton.setText('Finish')
+            self.nextButton.setEnabled(True)
             self.scale.mark_all_done()
             self._update_watchlist_button()
             self._finish_assessment()
@@ -636,23 +722,55 @@ class QualitativeAssessmentDialog(QDialog):
             self.webView.load(url)
 
     def _update_watchlist_button(self):
-        """Кнопка «Add to Watchlist»: disabled, если тикер уже в watchlist."""
+        """Кнопка сохранения результата (тикер уже есть — обновляем запись)."""
         from watchlist import find as watchlist_find
         if watchlist_find(self._ticker or '') is not None:
-            self.beginButton.setText('In Watchlist')
-            self.beginButton.setEnabled(False)
+            self.beginButton.setText('Update Watchlist')
         else:
             self.beginButton.setText('Add to Watchlist')
-            self.beginButton.setEnabled(True)
+        self.beginButton.setEnabled(True)
 
     def _finish_assessment(self):
-        """Собрать сгенерированный отчёт и показать итог.
+        """Собрать отчёт и показать итог.
 
-        Отчёт формируется приложением из рейтингов/заметок (и вставленного
-        вручную тезиса Quality Assessment) — ничего не извлекается из webview.
+        Тезис Quality Assessment сохраняется через кнопку «Quality result»
+        (rich text, сохраняет форматирование). Авто-захват из WebView НЕ
+        используется — он хватал страницу Google-поиска, а не ответ.
+        Результат сохраняется в Watchlist ТОЛЬКО при финише.
         """
-        self._quality = self._report_text()
+        self._finalize_report()
+
+    def _finalize_report(self):
+        self._auto_save_to_watchlist()
         if QWebEngineView is not None and isinstance(self.webView, QWebEngineView):
             self.webView.stop()
             self.webView.setHtml(self._stats_html())
         self._show_goat()
+
+    def _auto_save_to_watchlist(self):
+        """Сохранить Qual-результат в Watchlist ТОЛЬКО при финише.
+
+        Мержит с существующим snapshot (quant, catalyst и т.п. не теряются).
+        Если ничего не оценено (все звёзды 0 и нет тезиса) — запись не трогаем,
+        чтобы пустой прогон не затирал уже сохранённое.
+        """
+        if not self._ticker:
+            return
+        import datetime
+        from watchlist import find as watchlist_find
+        from watchlist import add as watchlist_add
+        ratings = [r for r in self._ratings if r > 0]
+        qual = (sum(ratings) / len(ratings)) if ratings else 0.0
+        if qual <= 0 and not self._quality and not self._quality_html:
+            return
+        existing = watchlist_find(self._ticker) or {}
+        snap = dict(existing.get('snapshot') or {})
+        snap['qual'] = round(qual, 2)
+        snap['date'] = datetime.date.today().isoformat()
+        snap['quality'] = self._report_text()
+        if self._quality_html:
+            snap['quality_html'] = self._quality_html
+        try:
+            watchlist_add(self._ticker, snapshot=snap)
+        except (OSError, ValueError) as exc:
+            print('Watchlist save failed: {}'.format(exc))

@@ -261,16 +261,21 @@ class WatchlistDialog(QtWidgets.QDialog):
                         item.setForeground(QColor('#f0c14b'))
                         item.setToolTip(
                             'Quant Assessment пройден' if c == 5
-                            else 'Qual Assessment пройден')
+                            else 'Qual Assessment пройден\nДвойной клик — '
+                                 'просмотр Qual-отчёта')
                     else:
                         item.setForeground(QColor(_TXT))
                         item.setToolTip(
                             'Quant Assessment не пройден' if c == 5
-                            else 'Qual Assessment не пройден')
+                            else 'Qual Assessment не пройден\nДвойной клик — '
+                                 'просмотр Qual-отчёта')
                 elif c == 9:
                     item.setToolTip(v)
                 elif c in (4, 6):
                     item.setForeground(QColor(_TXT))
+                    if c == 6:
+                        item.setToolTip(
+                            'Двойной клик — просмотр Qual-отчёта')
                 elif c == 8:
                     due = summary and summary['next'] <= today
                     item.setForeground(QColor(_RED if due else _LINK))
@@ -380,8 +385,108 @@ class WatchlistDialog(QtWidgets.QDialog):
     def _on_table_double(self, row, col):
         if col == 8:
             self._catalyst()
+        elif col in (6, 7):
+            self._view_quality()
         else:
             self._edit()
+
+    def _view_quality(self):
+        """Показать полный Qual-отчёт: таблица этапов, итоги, Quality Assessment."""
+        import re
+        entry = self._selected()
+        if entry is None:
+            return
+        snap = entry.get('snapshot') or {}
+        text = snap.get('quality')
+        if not text:
+            QtWidgets.QMessageBox.information(
+                self, 'Qual Assessment',
+                'Нет сохранённого Qual-отчёта для {}.'.format(
+                    entry.get('ticker', '')))
+            return
+
+        stages = []
+        avg = ''
+        total = ''
+        thesis = []
+        in_thesis = False
+        for ln in text.split('\n'):
+            if in_thesis:
+                thesis.append(ln)
+                continue
+            m = re.match(r'^(.*?):\s*(\d+)/5(?:\s*—\s*(.*))?$', ln)
+            if m and m.group(1) not in ('Ticker', 'Average', 'Total'):
+                stages.append((m.group(1), m.group(2),
+                               (m.group(3) or '').strip()))
+                continue
+            if ln.startswith('Quality Assessment:'):
+                in_thesis = True
+                continue
+            if ln.startswith('Average:'):
+                avg = ln[len('Average:'):].strip()
+            elif ln.startswith('Total:'):
+                total = ln[len('Total:'):].strip()
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Qual Assessment — {}'.format(
+            entry.get('ticker', '')))
+        dlg.resize(760, 540)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        table = QtWidgets.QTableWidget(max(1, len(stages)), 3)
+        table.setHorizontalHeaderLabels(['Этап', 'Оценка', 'Заметка'])
+        table.setEditTriggers(
+            QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        for r, (name, rating, note) in enumerate(stages):
+            for c, val in enumerate((name, rating + '/5', note)):
+                item = QtWidgets.QTableWidgetItem(val)
+                item.setForeground(QColor(_TXT))
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+        table.setFixedHeight(36 + 28 * max(1, len(stages)))
+        lay.addWidget(table)
+
+        summary = ' '.join(x for x in (avg, total) if x)
+        if summary:
+            lbl = QtWidgets.QLabel(summary)
+            lbl.setStyleSheet('color: {};'.format(_TXT))
+            lay.addWidget(lbl)
+
+        quality_html = snap.get('quality_html')
+        html_has_text = bool(re.sub(r'<[^>]+>', '', quality_html or '').strip())
+        if thesis or html_has_text:
+            head = QtWidgets.QLabel('Quality Assessment:')
+            head.setStyleSheet('color: {}; font-weight: bold;'.format(_TXT))
+            lay.addWidget(head)
+            if html_has_text:
+                tb = QtWidgets.QTextBrowser()
+                tb.setHtml(quality_html)
+                tb.setStyleSheet(
+                    'QTextBrowser { background-color: #1e1f24; '
+                    'color: #dcdce0; border: 1px solid #43464f; }')
+                lay.addWidget(tb, 1)
+            else:
+                te = QtWidgets.QPlainTextEdit()
+                te.setReadOnly(True)
+                te.setPlainText('\n'.join(thesis).strip())
+                te.setStyleSheet(
+                    'QPlainTextEdit { background-color: #1e1f24; '
+                    'color: #dcdce0; }')
+                lay.addWidget(te, 1)
+        else:
+            lay.addStretch(1)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        ok = QtWidgets.QPushButton('Close')
+        ok.clicked.connect(dlg.accept)
+        row.addWidget(ok)
+        lay.addLayout(row)
+        dlg.exec()
 
     def _add(self):
         dlg = WatchlistEntryDialog(snapshot={}, parent=self)
