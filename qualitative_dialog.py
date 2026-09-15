@@ -409,6 +409,7 @@ class QualitativeAssessmentDialog(QDialog):
         self.notesButton.clicked.connect(self._open_notes)
         self.notesButton.setEnabled(False)
         self.starRating.ratingChanged.connect(self._on_rating_changed)
+        self.starRating.setEnabled(False)
 
     # ------------------------------------------------------------------ UI
     def _build_header(self, root):
@@ -438,15 +439,14 @@ class QualitativeAssessmentDialog(QDialog):
         row = QHBoxLayout()
         self.notesButton = QPushButton('Notes')
         self.notesButton.setMinimumWidth(80)
-        row.addWidget(self.notesButton)
-        row.addStretch(1)
         rating_lbl = QLabel('Rating (0-5):')
         self.starRating = StarRating()
-        self.nextButton = QPushButton('Next')
-        self.nextButton.setMinimumWidth(110)
+        row.addWidget(self.notesButton)
         row.addWidget(rating_lbl)
         row.addWidget(self.starRating)
-        row.addSpacing(20)
+        row.addStretch(1)
+        self.nextButton = QPushButton('Next')
+        self.nextButton.setMinimumWidth(110)
         row.addWidget(self.nextButton)
         root.addLayout(row)
 
@@ -582,9 +582,37 @@ class QualitativeAssessmentDialog(QDialog):
         return '\n'.join(lines)
 
     def _stats_html(self):
-        body = _esc_html(self._report_text()).replace('\n', '<br>')
-        return ('<pre style="white-space:pre-wrap; font-family:Sans; '
-                'font-size:13px; color:#dcdce0;">{}</pre>'.format(body))
+        rows = []
+        total = 0
+        for i, name in enumerate(STAGES):
+            rating = self._ratings[i]
+            total += rating
+            note = self._notes[i].strip()
+            note_html = '<br><i>Notes:</i> {}'.format(_esc_html(note)) if note else ''
+            rows.append('<tr><td>{}</td><td style="text-align:center">{}'
+                        '/5</td>'
+                        '<td style="text-align:left">{}</td></tr>'
+                        .format(_esc_html(name), rating, note_html))
+        body = ''.join(rows)
+        avg = total / len(STAGES) if STAGES else 0
+        ticker = _esc_html(self._ticker or 'stock')
+        return (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<style>body{{background:#1e1f24;color:#dcdce0;font-family:Sans;'
+            'font-size:13px;margin:12px;}}'
+            'h2{{color:#dcdce0;}}'
+            'table{{border-collapse:collapse;width:100%;}}'
+            'th,td{{border:1px solid #43464f;padding:6px;}}'
+            'th{{text-align:left;}}</style></head><body>'
+            '<h2>Assessment statistics</h2>'
+            '<p>Ticker: <b>{}</b></p>'
+            '<table><tr><th>Stage</th><th>Rating</th><th>Notes</th></tr>'
+            '{}</table>'
+            '<p>Average: <b>{:.2f} / 5</b></p>'
+            '<p>Total: <b>{}</b> / {}</p>'
+            '</body></html>'
+        ).format(ticker, body, avg, total,
+                 len(STAGES) * StarRating.MAX_STARS)
 
     def _next_stage(self):
         self._current_stage += 1
