@@ -295,6 +295,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.watchlistButton.clicked.connect(self.watchlistClicked)
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
+        self.dealHistoryButton.clicked.connect(self.dealHistoryClicked)
         self.tradeTableView.setColumnWidth(12, 70)
         self.tradeTableView.setColumnWidth(13, 80)
         self.tradeTableView.setColumnWidth(14, 70)
@@ -848,6 +849,27 @@ class TradeDiary(QtWidgets.QMainWindow):
         if cost_usd is not None:
             self.base_balance -= cost_usd
 
+    def _creditClose(self, deal):
+        """Зачислить/списать средства при закрытии сделки.
+
+        LONG — выручка от продажи возвращается на cash (равно стоимости
+        позиции + P&L). SHORT — стоимость выкупа списывается с cash.
+        История закрытых сделок будет вестись отдельно (вкладка History).
+        """
+        proceeds_usd = None
+        if deal.currency == markets.RUB:
+            rate = markets.fetch_usd_rate()
+            if rate:
+                proceeds_usd = deal.stock_price * deal.amount / rate
+        elif deal.currency == markets.USD:
+            proceeds_usd = deal.stock_price * deal.amount
+        if proceeds_usd is None:
+            return
+        if deal.direction == Direction.SHORT:
+            self.base_balance -= proceeds_usd
+        else:
+            self.base_balance += proceeds_usd
+
     def shortClicked(self):
         log.info("Short clicked")
         dlg = DealDialog()
@@ -924,6 +946,10 @@ class TradeDiary(QtWidgets.QMainWindow):
         dlg.setData(deal, self.balanceUsd())
         if dlg.exec():
             log.info("Success!")
+            if deal.close_date:
+                self._creditClose(deal)
+                self.data.remove(deal)
+                self._rebuildChartButtons()
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
 

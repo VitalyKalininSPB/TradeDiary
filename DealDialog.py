@@ -119,6 +119,18 @@ class DealDialog(QDialog):
 
     def okPressed(self):
         print('Accept')
+        deal = self.makeDeal()
+        if not FutureUtil.is_future(deal):
+            ok, reason = self._assessments_ok()
+            if not ok:
+                self.infoLabel.setText(
+                    reason + '. Сделка запрещена: сначала заверши Quant и '
+                    'Qual Assessment для этого тикера.')
+                self._show_goat(
+                    'Запрет: {} для {}. Сначала заверши Quant и Qual '
+                    'Assessment — только потом открывай сделку.'.format(
+                        reason, deal.ticker))
+                return
         self.riskManager = RiskManager()
         self.riskManager.balance = 0 #self._balance
         self.riskManager.deal = self.makeDeal();
@@ -137,6 +149,35 @@ class DealDialog(QDialog):
             )
             if choice == QtWidgets.QMessageBox.StandardButton.Yes:
                 self.accept()
+
+    def _assessments_ok(self):
+        """Для сделки нужны оба Assessment: Quant и Qual (в watchlist)."""
+        from watchlist import find as watchlist_find
+        ticker = (self.ticketEdit.text() or '').strip().upper()
+        if not ticker:
+            return True, ''
+        entry = watchlist_find(ticker) or {}
+        snap = entry.get('snapshot') or {}
+        missing = []
+        if snap.get('quant') is None:
+            missing.append('Quant')
+        if snap.get('qual') is None and not snap.get('quality'):
+            missing.append('Qual')
+        if missing:
+            names = ' и '.join(missing)
+            return False, 'Не пройден Assessment: {}'.format(names)
+        return True, ''
+
+    def _show_goat(self, advice):
+        from qualitative_dialog import GoatAssistant
+        if getattr(self, '_goat', None) is not None:
+            self._goat.close()
+            self._goat.deleteLater()
+            self._goat = None
+        if not advice:
+            return
+        self._goat = GoatAssistant('', self, advice=advice, auto_hide_ms=10000)
+        self._goat.show()
 
     def cancelPressed(self):
         print('Reject')

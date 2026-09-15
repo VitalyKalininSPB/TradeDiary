@@ -19,8 +19,8 @@ _STATUS_COLORS = {
     'Owned': '#2e7d32',
 }
 
-_HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Qual', 'Quant',
-            'Catalyst', 'Note']
+_HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Quant', 'Quant ✓',
+            'Qual', 'Qual ✓', 'Catalyst', 'Note']
 _EV_HEADERS = ['Ticker', 'Дата', 'Балл', 'Напр', 'Описание', 'Ожидание']
 
 
@@ -92,6 +92,10 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
                                  cat.get('max', '-')))
         elif isinstance(cat, (int, float)):
             parts.append('Catalyst: {:.2f}/5'.format(cat))
+        q = snapshot.get('quality')
+        if q:
+            snippet = q.replace('\n', ' ').strip()
+            parts.append('Quality: {}…'.format(snippet[:60]))
         if not parts:
             return 'нет снапшота'
         if date:
@@ -227,6 +231,8 @@ class WatchlistDialog(QtWidgets.QDialog):
         today = datetime.date.today().isoformat()
         for r, e in enumerate(entries):
             snap = e.get('snapshot') or {}
+            quant_ok = snap.get('quant') is not None
+            qual_ok = snap.get('qual') is not None or bool(snap.get('quality'))
             summary = catalyst.summary_for(e.get('ticker', ''))
             cat_txt = ''
             if summary:
@@ -237,8 +243,10 @@ class WatchlistDialog(QtWidgets.QDialog):
                 e.get('status', watchlist.DEFAULT_STATUS),
                 e.get('date', ''),
                 e.get('reason', ''),
-                self._fmt(snap.get('qual'), '/5'),
                 self._fmt(snap.get('quant')),
+                '💡' if quant_ok else '—',
+                self._fmt(snap.get('qual'), '/5'),
+                '💡' if qual_ok else '—',
                 cat_txt,
                 e.get('note', ''),
             ]
@@ -248,11 +256,22 @@ class WatchlistDialog(QtWidgets.QDialog):
                     color = _STATUS_COLORS.get(v, _STATUS_COLORS['Research'])
                     item.setBackground(QColor(color))
                     item.setForeground(QColor('#ffffff'))
-                elif c == 7:
+                elif c in (5, 7):
+                    if v == '💡':
+                        item.setForeground(QColor('#f0c14b'))
+                        item.setToolTip(
+                            'Quant Assessment пройден' if c == 5
+                            else 'Qual Assessment пройден')
+                    else:
+                        item.setForeground(QColor(_TXT))
+                        item.setToolTip(
+                            'Quant Assessment не пройден' if c == 5
+                            else 'Qual Assessment не пройден')
+                elif c == 9:
                     item.setToolTip(v)
-                elif c in (4, 5):
+                elif c in (4, 6):
                     item.setForeground(QColor(_TXT))
-                elif c == 6:
+                elif c == 8:
                     due = summary and summary['next'] <= today
                     item.setForeground(QColor(_RED if due else _LINK))
                     f = item.font()
@@ -359,7 +378,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         return None
 
     def _on_table_double(self, row, col):
-        if col == 6:
+        if col == 8:
             self._catalyst()
         else:
             self._edit()

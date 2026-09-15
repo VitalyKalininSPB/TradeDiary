@@ -4,6 +4,10 @@ import os
 from urllib.parse import quote_plus
 
 
+def _esc_html(s):
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 # Картинка козы. Ищем в repo `assets/`, затем — пользовательский Downloads.
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 _GOAT_CANDIDATES = [
@@ -29,7 +33,8 @@ except Exception:  # pragma: no cover - fallback
 STAGES = ['Management Operation Plan (MOP)', 'KPI',
           'Management Track Record', 'Board of directors',
           'Insider Stock & Option Ownership',
-          'Research Analyst Estimates, Range and Ratings']
+          'Research Analyst Estimates, Range and Ratings',
+          'Quality Assessment']
 
 # Промт этапа MOP. Показываем как копируемый текст в webview (в URL Google
 # поиска длинный русский текст не помещается — кириллица кодируется в 4–6 раз
@@ -129,6 +134,19 @@ ANALYST_PROMPT = """Проанализируй Research Analyst Estimates, Targe
 
 Не используй target price как самостоятельный сигнал к покупке. Указывай источники и даты."""
 
+QUALITY_PROMPT = """Проведи Quality Assessment (Thesis Validation & Invalidation) для [ТИКЕР] на горизонте 20–60 торговых дней для потенциальной виртуальной long-позиции.
+
+Используй только актуальные публичные источники: последний earnings release/call, 10-Q/10-K, официальный guidance, при необходимости analyst consensus. Приоритет — первичные источники компании и SEC. Для каждого числового порога укажи дату и ссылку на источник.
+
+Формат:
+1) Тезис (Thesis) — одно предложение: какая фундаментальная гипотеза должна реализоваться, чтобы long-идея была разумной;
+2) Что подтверждает тезис — не более 3 пунктов; каждый — наблюдаемый факт/KPI с числом, сроком и источником;
+3) Что опровергает тезис или требует пересмотра — не более 3 пунктов; конкретные факты, при которых тезис ослабевает/отменяется. Не используй только движение цены;
+4) Событие проверки и срок — ближайшее событие, на котором можно проверить тезис, и ориентировочная дата/период пересмотра;
+5) Ключевая неопределённость — один факт, который нельзя надёжно установить из публичных данных и который сильнее всего ограничивает уверенность.
+
+Правила: разделяй management guidance, analyst consensus и собственную интерпретацию; не утверждай, что «рынок заложил» что-то без прямых данных; без общих формулировок вроде «следить за результатами»; если точный порог нельзя обосновать первоисточником — используй направленное условие; не принимай решение покупать/продавать. Пиши по-русски."""
+
 # Промты для стадий Qualitative Assessment. Подставляются как полный запрос
 # Google-поиска при переходе на стадию.
 STAGE_PROMPTS = {
@@ -138,6 +156,7 @@ STAGE_PROMPTS = {
     3: ('Board of Directors', BOARD_PROMPT),
     4: ('Insider Stock & Option Ownership', INSIDER_PROMPT),
     5: ('Research Analyst Estimates, Range and Ratings', ANALYST_PROMPT),
+    6: ('Quality Assessment', QUALITY_PROMPT),
 }
 
 
@@ -373,6 +392,7 @@ class QualitativeAssessmentDialog(QDialog):
         self._assessment_started = False
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
+        self._quality = ''
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
@@ -416,17 +436,17 @@ class QualitativeAssessmentDialog(QDialog):
 
     def _build_bottom(self, root):
         row = QHBoxLayout()
+        self.notesButton = QPushButton('Notes')
+        self.notesButton.setMinimumWidth(80)
+        row.addWidget(self.notesButton)
         row.addStretch(1)
         rating_lbl = QLabel('Rating (0-5):')
         self.starRating = StarRating()
-        self.notesButton = QPushButton('Notes')
-        self.notesButton.setMinimumWidth(80)
         self.nextButton = QPushButton('Next')
         self.nextButton.setMinimumWidth(110)
         row.addWidget(rating_lbl)
         row.addWidget(self.starRating)
         row.addSpacing(20)
-        row.addWidget(self.notesButton)
         row.addWidget(self.nextButton)
         root.addLayout(row)
 
@@ -435,11 +455,15 @@ class QualitativeAssessmentDialog(QDialog):
         return ['{} {}'.format(s, ticker).strip() for s in STAGES]
 
     # --------------------------------------------------------------- flow
-    def _show_goat(self):
+    def _show_goat(self, advice=None):
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
-        self._goat = GoatAssistant(self._ticker, self)
+        if advice:
+            self._goat = GoatAssistant(self._ticker, self, advice=advice,
+                                       auto_hide_ms=12000)
+        else:
+            self._goat = GoatAssistant(self._ticker, self, auto_hide_ms=6000)
         self._goat.show()
 
     def closeEvent(self, event):
@@ -468,6 +492,8 @@ class QualitativeAssessmentDialog(QDialog):
         qual = (sum(ratings) / len(ratings)) if ratings else 0.0
         snapshot = {'qual': round(qual, 2),
                     'date': datetime.date.today().isoformat()}
+        if self._quality:
+            snapshot['quality'] = self._quality
         from watchlist_dialog import WatchlistEntryDialog
         dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snapshot,
                                    parent=self)
@@ -490,13 +516,29 @@ class QualitativeAssessmentDialog(QDialog):
         self._current_stage = -1
         self._ratings = [0] * len(STAGES)
         self._notes = [''] * len(STAGES)
+        self._quality = ''
         self._assessment_started = True
         self.beginButton.setText('Add to Watchlist')
         self.beginButton.setEnabled(False)
         self.nextButton.setEnabled(True)
         self.notesButton.setEnabled(True)
         self.starRating.setEnabled(True)
+        self._warn_if_no_quant()
         self._next_stage()
+
+    def _warn_if_no_quant(self):
+        """Коза предупреждает: Qual без пройденного Quant Assessment."""
+        if not self._ticker:
+            return
+        from watchlist import find as watchlist_find
+        entry = watchlist_find(self._ticker) or {}
+        snap = entry.get('snapshot') or {}
+        if snap.get('quant') is None:
+            self._show_goat(
+                'Warning: Qualitative Assessment для {} без пройденного '
+                'Quant Assessment. Сначала пройди Quant (Сравнение с '
+                'сектором) для этого тикера, иначе оценка неполная.'.format(
+                    self._ticker))
 
     def _open_notes(self):
         if not (0 <= self._current_stage < len(STAGES)):
@@ -517,31 +559,32 @@ class QualitativeAssessmentDialog(QDialog):
         if dlg.exec() == QDialog.Accepted:
             self._notes[self._current_stage] = editor.toPlainText()
 
-    def _stats_html(self):
-        rows = []
+    def _report_text(self):
+        """Текстовый отчёт оценки (сохраняется в snapshot Watchlist).
+
+        Генерируется приложением, а не извлекается из браузера: копировать
+        из webview ничего не нужно.
+        """
+        lines = ['Ticker: {}'.format(self._ticker or 'stock')]
         total = 0
         for i, name in enumerate(STAGES):
             rating = self._ratings[i]
             total += rating
             note = self._notes[i].strip()
-            note_html = '<br><i>Notes:</i> {}'.format(note) if note else ''
-            rows.append('<tr><td>{}</td><td style="text-align:center">{}'
-                        '/5</td>'
-                        '<td style="text-align:left">{}</td></tr>'
-                        .format(name, rating, note_html))
-        body = ''.join(rows)
+            if note:
+                lines.append('{}: {}/5 — {}'.format(name, rating, note))
+            else:
+                lines.append('{}: {}/5'.format(name, rating))
         avg = total / len(STAGES) if STAGES else 0
-        ticker = self._ticker or 'stock'
-        return (
-            '<h2>Assessment statistics</h2>'
-            '<p>Ticker: <b>{}</b></p>'
-            '<table cellpadding="8" cellspacing="0" border="1" '
-            'style="border-collapse:collapse" width="100%">'
-            '<tr><th>Stage</th><th>Rating</th><th>Notes</th></tr>{}</table>'
-            '<p>Average: <b>{:.2f} / 5</b></p>'
-            '<p>Total: <b>{}</b> / {}</p>'
-        ).format(ticker, body, avg, total,
-                 len(STAGES) * StarRating.MAX_STARS)
+        lines.append('Average: {:.2f} / 5'.format(avg))
+        lines.append('Total: {} / {}'.format(
+            total, len(STAGES) * StarRating.MAX_STARS))
+        return '\n'.join(lines)
+
+    def _stats_html(self):
+        body = _esc_html(self._report_text()).replace('\n', '<br>')
+        return ('<pre style="white-space:pre-wrap; font-family:Sans; '
+                'font-size:13px; color:#dcdce0;">{}</pre>'.format(body))
 
     def _next_stage(self):
         self._current_stage += 1
@@ -549,10 +592,8 @@ class QualitativeAssessmentDialog(QDialog):
             self.nextButton.setEnabled(False)
             self.nextButton.setText('Next')
             self.scale.mark_all_done()
-            self.beginButton.setEnabled(True)
-            if QWebEngineView is not None:
-                self.webView.setHtml(self._stats_html())
-            self._show_goat()
+            self._update_watchlist_button()
+            self._finish_assessment()
             return
         self.scale.set_stage(self._current_stage)
         self.starRating.setRating(0)
@@ -565,3 +606,25 @@ class QualitativeAssessmentDialog(QDialog):
         if QWebEngineView is not None:
             url = 'https://www.google.com/search?q=' + quote_plus(query) + '&udm=50'
             self.webView.load(url)
+
+    def _update_watchlist_button(self):
+        """Кнопка «Add to Watchlist»: disabled, если тикер уже в watchlist."""
+        from watchlist import find as watchlist_find
+        if watchlist_find(self._ticker or '') is not None:
+            self.beginButton.setText('In Watchlist')
+            self.beginButton.setEnabled(False)
+        else:
+            self.beginButton.setText('Add to Watchlist')
+            self.beginButton.setEnabled(True)
+
+    def _finish_assessment(self):
+        """Собрать сгенерированный отчёт и показать итог.
+
+        Отчёт формируется приложением из рейтингов/заметок (и вставленного
+        вручную тезиса Quality Assessment) — ничего не извлекается из webview.
+        """
+        self._quality = self._report_text()
+        if QWebEngineView is not None and isinstance(self.webView, QWebEngineView):
+            self.webView.stop()
+            self.webView.setHtml(self._stats_html())
+        self._show_goat()
