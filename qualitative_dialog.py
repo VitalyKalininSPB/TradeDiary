@@ -199,6 +199,7 @@ class GoatAssistant(QWidget):
         target_h = 220
         self._pixmap = self._src.scaledToHeight(
             target_h, Qt.TransformationMode.SmoothTransformation)
+        self._mouth = self._mouth_anchor()
         self._font = QFont('Sans', 12)
         self._font.setBold(True)
         fm = QFontMetrics(self._font)
@@ -243,6 +244,22 @@ class GoatAssistant(QWidget):
         self.confirmed.emit()
         self.close()
 
+    def _mouth_anchor(self):
+        """Точка на переднем крае фигуры для хвоста пузыря.
+
+        Ищется по фактической прозрачности отмасштабированной картинки:
+        левый непрозрачный пиксель в средней полосе по высоте (морда/перед).
+        Внутренние тёмные детали (глаза, рога) на альфу не влияют.
+        """
+        img = self._pixmap.toImage()
+        w, h = img.width(), img.height()
+        y0, y1 = int(h * 0.25), int(h * 0.75)
+        for x in range(w):
+            for y in range(y0, y1):
+                if img.pixelColor(x, y).alpha() > 60:
+                    return QPoint(x, y)
+        return QPoint(int(w * 0.15), int(h * 0.45))
+
     def _place(self, parent=None):
         """Anchor to the bottom-right corner of the screen, not the window.
 
@@ -267,11 +284,8 @@ class GoatAssistant(QWidget):
         goat_x = self.width() - self._pixmap.width()
         rect = QRect(8, 8, self._bubble_w, self._bubble_h)
 
-        # Mouth anchor measured on the original 677x369 image, scaled to display.
-        mouth_x = 214 * self._pixmap.width() / 677.0
-        mouth_y = 115 * self._pixmap.height() / 369.0
         goat_y = max(6, (self.height() - self._pixmap.height()) // 2)
-        tip = QPoint(int(goat_x + mouth_x), int(goat_y + mouth_y))
+        tip = QPoint(goat_x + self._mouth.x(), goat_y + self._mouth.y())
 
         bubble = QPainterPath()
         bubble.addRoundedRect(rect, 16, 16)
