@@ -246,6 +246,25 @@ Analysis и остальные экраны не развиваем, не пер
 - `simple_mode_settings.py`: QSettings-синглтон Simple Mode (`is_simple_enabled`,
   `set_simple_enabled`, сигнал `changed(bool)`); виджет `SimpleModePanel` и интеграция
   Simple/Full в `recommendation_panel.py`, тумблер `⚡ Simple Mode` в main.py (top right).
+- **Technical timing** (Simple Mode, Этап 1 + ядро Этапа 2):
+  - `technical_timing.py`: **чистый модуль** (без Qt). `compute_indicators(closes)` →
+    SMA50/200, RSI(14) Wilder, MACD(12,26,9); `build_timing(ticker, dates, closes,
+    direction)` → статус (ready/wait/reassess/no_data) + reason (RU) + мягкий warning.
+    Логика: конфликты для long = цена<SMA200 / death cross / MACD bearish (для short —
+    зеркально); 0 → **READY**, 1 → **WAIT**, 2–3 → **REASSESS**; RSI/растянутость НЕ
+    блокирует (только warning при READY). SQLite `technical_timing.db` (kv, TTL 24ч),
+    `load_timing`/`load_any_timing`/`save_timing`/`is_fresh`. `compute_fresh(ticker)` —
+    фоновый пересчёт (сеть через `price_history`, вызывать ТОЛЬКО из потока).
+  - `technical_timing_dialog.py`: блок «Technical timing — Daily» (Trend/Momentum/
+    Status/Reason/Warning) + сигналы `open_trade_plan`/`view_chart`.
+  - `watchlist_dialog.py`: колонка **Tech** (цветной статус), кнопка **Technical**,
+    двойной клик по колонке; `_TechnicalTimingThread` (фоновый пересчёт, `cancel()`),
+    `_open_trade_plan` (DealDialog с контекстом, Long по умолчанию), `_view_chart`.
+  - `DealDialog.py`: блок «Technical context» (только чтение из БД, без пересчёта) +
+    кнопка Chart; `loadTechnicalContext(ticker, hint=False)` — при `hint=True` и мягком
+    warning показывает подсказку козы (`_show_goat`). Вызывается из `tickerChanged`
+    и `setMode`; кнопка «Open trade plan» в Watchlist зовёт с `hint=True`.
+  - Тесты: `tests/test_technical_timing.py` (13, синтетические ряды).
 
 ## S&P 500: инструменты и прокси доходности (важно для backtest-запросов)
 

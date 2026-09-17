@@ -13,6 +13,15 @@ import markets
 import logo
 import risk_plan
 import risk_settings
+import technical_timing
+
+_TXT = '#dcdce0'
+_MUTED = '#9aa0aa'
+
+
+def _esc(s):
+    return str(s).replace('&', '&amp;').replace('<', '&lt;')
+
 
 class DirectionType(Enum):
     BUY = 1
@@ -98,6 +107,101 @@ class DealDialog(QDialog):
         self._equity_usd = 0.0
         self._updating_risk = False
         self._update_risk_plan()
+
+        self.resize(600, 800)
+        self.buttonBox_2.setGeometry(10, 762, 341, 32)
+        self._build_tech_context()
+
+    def _build_tech_context(self):
+        """Компактный блок «Technical context» (только чтение из БД).
+
+        Позиционируется в свободной области между Risk plan и кнопками;
+        deal.ui не трогаем, чтобы не перестраивать абсолютную геометрию.
+        """
+        self.techGroup = QtWidgets.QGroupBox('Technical context', self)
+        self.techGroup.setGeometry(20, 655, 560, 100)
+        lay = QtWidgets.QVBoxLayout(self.techGroup)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(4)
+        self.techLabel = QtWidgets.QLabel(
+            'Технический контекст не рассчитан — добавьте тикер в Watchlist '
+            'и откройте «Technical timing».')
+        self.techLabel.setWordWrap(True)
+        self.techLabel.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.techLabel.setStyleSheet(
+            'color: {}; font-size: 10px;'.format(_MUTED))
+        lay.addWidget(self.techLabel, 1)
+        self.techChartButton = QtWidgets.QPushButton('Chart')
+        self.techChartButton.setStyleSheet('QPushButton { font-size: 10px; }')
+        self.techChartButton.setCursor(
+            QtCore.Qt.CursorShape.PointingHandCursor)
+        self.techChartButton.clicked.connect(self._open_tech_chart)
+        lay.addWidget(self.techChartButton, 0,
+                      QtCore.Qt.AlignmentFlag.AlignRight)
+        self._tech_result = None
+
+    def loadTechnicalContext(self, ticker, hint=False):
+        """Показать последний рассчитанный Technical timing (без пересчёта).
+
+        Только чтение из кэша — никакой сети и расчётов на UI-потоке.
+        `hint=True` (из «Open trade plan») — подсказка козы при мягком
+        предупреждении о растянутости.
+        """
+        ticker = (ticker or '').strip()
+        self._tech_result = None
+        self.techChartButton.setVisible(False)
+        if not ticker:
+            self._tech_empty()
+            return
+        direction = ('short' if getattr(self, '_direction', Direction.LONG)
+                     == Direction.SHORT else 'long')
+        result = technical_timing.load_timing(ticker, direction) \
+            or technical_timing.load_any_timing(ticker)
+        if not result or result.get('status') == 'no_data':
+            self._tech_empty()
+            return
+        self._tech_result = result
+        self.techChartButton.setVisible(True)
+        status = result.get('status') or 'no_data'
+        color = result.get('status_color') or _MUTED
+        warning = result.get('warning') or ''
+        lines = [
+            '<b style="color:{0};">{1}</b>'.format(
+                color, _esc(result.get('status_txt') or status)),
+            'Price vs SMA 200: {} · SMA 50/200: {}'.format(
+                _esc(result.get('price_vs_sma200_txt') or '—'),
+                _esc(result.get('cross_txt') or '—')),
+            'RSI(14): {} · MACD: {}'.format(
+                _esc(result.get('rsi_txt') or '—'),
+                _esc(result.get('macd_txt') or '—')),
+            'Stop reference: {}'.format(
+                _esc(result.get('stop_ref') or '—')),
+        ]
+        if warning:
+            lines.append(
+                '<span style="color:#f0c14b;">⚠ {}</span>'.format(_esc(warning)))
+        self.techLabel.setText('<br>'.join(lines))
+        self.techLabel.setStyleSheet(
+            'color: {}; font-size: 10px;'.format(_TXT))
+        if hint and warning:
+            self._show_goat(warning)
+
+    def _tech_empty(self):
+        self.techLabel.setText(
+            'Технический контекст не рассчитан — добавьте тикер в Watchlist '
+            'и откройте «Technical timing».')
+        self.techLabel.setStyleSheet(
+            'color: {}; font-size: 10px;'.format(_MUTED))
+
+    def _open_tech_chart(self):
+        ticker = (self.ticketEdit.text() or '').strip()
+        if not ticker:
+            return
+        from ma_chart_dialog import MAChartDialog
+        _market, currency = markets.market_currency(ticker)
+        dlg = MAChartDialog(ticker, currency or markets.USD, '', '', self)
+        dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def setData(self, balance):
         self._balance = balance
@@ -197,6 +301,9 @@ class DealDialog(QDialog):
             self._direction = Direction.SHORT
             self.label_5.setText('Stop Loss (>=):')
             self.label_6.setText('Take Profit (<=):')
+        ticker = (self.ticketEdit.text() or '').strip()
+        if ticker:
+            self.loadTechnicalContext(ticker)
 
     def makeDeal(self):
         deal = Deal()
@@ -343,6 +450,7 @@ class DealDialog(QDialog):
         ticker = self.ticketEdit.text().strip()
         if not ticker:
             self.setLogo('', None)
+            self.loadTechnicalContext('')
             return 'Stock'
         market, currency = markets.market_currency(ticker)
         if market is not None:
@@ -354,6 +462,7 @@ class DealDialog(QDialog):
             if price is not None:
                 self.priceEdit.setText(str(price))
         self.setLogo(ticker, market)
+        self.loadTechnicalContext(ticker)
         return 'Stock'
 
     def priceChanged(self):

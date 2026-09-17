@@ -2,16 +2,18 @@
 import datetime
 
 from PySide6 import QtWidgets
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor
 
 import catalyst
 import markets
+import technical_timing
 import watchlist
 
 _TXT = '#dcdce0'
 _RED = '#ef5350'
 _LINK = '#7aa2f7'
+_MUTED = '#9aa0aa'
 _STATUS_COLORS = {
     'Research': '#3a5a8c',
     'Watching': '#9a6b1f',
@@ -20,7 +22,7 @@ _STATUS_COLORS = {
 }
 
 _HEADERS = ['Ticker', 'Status', 'Date', 'Reason', 'Quant', 'Quant ✓',
-            'Qual', 'Qual ✓', 'Catalyst', 'Note']
+            'Qual', 'Qual ✓', 'Catalyst', 'Tech', 'Note']
 _EV_HEADERS = ['Ticker', 'Дата', 'Балл', 'Напр', 'Описание', 'Ожидание']
 
 
@@ -112,6 +114,36 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
         }
 
 
+class _TechnicalTimingThread(QThread):
+    """Фоновый пересчёт Technical timing по тикерам Watchlist.
+
+    Сеть (обновление цен) и запись в БД — только здесь, вне UI-потока.
+    Свежие результаты из кэша пропускаются (compute_fresh вернёт None);
+    эмитится только пересчитанное.
+    """
+
+    timing_ready = Signal(str, object)  # ticker, result
+
+    def __init__(self, tickers, parent=None):
+        super().__init__(parent)
+        self._tickers = [t for t in (tickers or []) if t]
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        for t in self._tickers:
+            if self._cancel:
+                break
+            try:
+                result = technical_timing.compute_fresh(t)
+            except Exception:  # pragma: no cover - best-effort
+                result = None
+            if result is not None:
+                self.timing_ready.emit(t, result)
+
+
 class WatchlistDialog(QtWidgets.QDialog):
     """Watchlist: ручные решения по компаниям (Research/Watching/Rejected/
     Owned) с заметкой, датой, причиной и снапшотом score."""
@@ -147,6 +179,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         self.removeButton = QtWidgets.QPushButton('Remove')
         self.chartButton = QtWidgets.QPushButton('Chart')
         self.catalystButton = QtWidgets.QPushButton('Catalyst')
+        self.technicalButton = QtWidgets.QPushButton('Technical')
         self.testNotifyButton = QtWidgets.QPushButton('Test notify (15s)')
         self.closeButton = QtWidgets.QPushButton('Close')
         row.addWidget(self.addButton)
@@ -154,6 +187,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         row.addWidget(self.removeButton)
         row.addWidget(self.chartButton)
         row.addWidget(self.catalystButton)
+        row.addWidget(self.technicalButton)
         row.addWidget(self.testNotifyButton)
         row.addStretch(1)
         row.addWidget(self.closeButton)
@@ -164,10 +198,12 @@ class WatchlistDialog(QtWidgets.QDialog):
         self.removeButton.clicked.connect(self._remove)
         self.chartButton.clicked.connect(self._chart)
         self.catalystButton.clicked.connect(self._catalyst)
+        self.technicalButton.clicked.connect(self._technical)
         self.testNotifyButton.clicked.connect(self._test_notify)
         self.closeButton.clicked.connect(self.close)
         self._test_timer = None
         self._test_timer2 = None
+        self._timing_loader = None
 
         sim_row = QtWidgets.QHBoxLayout()
         simLabel = QtWidgets.QLabel('Симуляция (тест):')
@@ -240,6 +276,14 @@ class WatchlistDialog(QtWidgets.QDialog):
             if summary:
                 cat_txt = '{} · {} · {}/5'.format(
                     summary['count'], summary['next'], summary['max'])
+            tech = technical_timing.load_timing(e.get('ticker', '')) \
+                or technical_timing.load_any_timing(e.get('ticker', ''))
+            if tech and tech.get('status') != 'no_data':
+                tech_txt = tech['status_txt']
+                tech_color = tech['status_color']
+            else:
+                tech_txt = 'Нет данных' if tech else '…'
+                tech_color = _MUTED
             vals = [
                 e.get('ticker', ''),
                 e.get('status', watchlist.DEFAULT_STATUS),
@@ -250,6 +294,7 @@ class WatchlistDialog(QtWidgets.QDialog):
                 self._fmt((ql or {}).get('score'), '/5'),
                 '💡' if qual_ok else '—',
                 cat_txt,
+                tech_txt,
                 e.get('note', ''),
             ]
             for c, v in enumerate(vals):
@@ -271,7 +316,7 @@ class WatchlistDialog(QtWidgets.QDialog):
                             'Quant Assessment не пройден' if c == 5
                             else 'Qual Assessment не пройден\nДвойной клик — '
                                  'просмотр Qual-отчёта')
-                elif c == 9:
+                elif c == 10:
                     item.setToolTip(v)
                 elif c in (4, 6):
                     item.setForeground(QColor(_TXT))
@@ -293,9 +338,51 @@ class WatchlistDialog(QtWidgets.QDialog):
                     else:
                         item.setToolTip(
                             'Двойной клик — добавить катализаторы.')
+                elif c == 9:
+                    item.setForeground(QColor(tech_color))
+                    item.setToolTip(
+                        'Двойной клик — Technical timing.\n' +
+                        (tech.get('reason') if tech else
+                         'Технический статус загружается…'))
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()
         self._refresh_events()
+        self._start_timing(
+            [e.get('ticker', '') for e in entries if e.get('ticker')])
+
+    def _start_timing(self, tickers):
+        """Фоновый пересчёт Technical timing (мгновенный рендер уже из кэша).
+
+        Не блокируем UI: если предыдущий пересчёт ещё идёт — дожидаемся его
+        результатов (compute_fresh не зависит от состава списка на старте).
+        """
+        if self._timing_loader is not None and self._timing_loader.isRunning():
+            return
+        if not tickers:
+            return
+        loader = _TechnicalTimingThread(tickers)
+        self._timing_loader = loader
+        loader.timing_ready.connect(self._on_timing_ready)
+        loader.start()
+
+    def _on_timing_ready(self, ticker, result):
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item and (item.text() or '').strip().upper() == ticker:
+                status = result.get('status') or 'no_data'
+                txt = result.get('status_txt') or status
+                color = result.get('status_color') or _MUTED
+                cell = self.table.item(r, 9)
+                if cell is None:
+                    cell = QtWidgets.QTableWidgetItem(txt)
+                    self.table.setItem(r, 9, cell)
+                else:
+                    cell.setText(txt)
+                cell.setForeground(QColor(color))
+                cell.setToolTip(
+                    'Двойной клик — Technical timing.\n' +
+                    (result.get('reason') or ''))
+                break
 
     def _refresh_events(self):
         self._events = catalyst.all_events()
@@ -378,6 +465,68 @@ class WatchlistDialog(QtWidgets.QDialog):
         dlg.show()
         dlg.finished.connect(lambda *_: self._refresh())
 
+    def _technical(self):
+        """Блок «Technical timing — Daily» для выбранного тикера."""
+        entry = self._selected()
+        if entry is None:
+            return
+        ticker = entry.get('ticker', '')
+        if not ticker:
+            return
+        from technical_timing_dialog import TechnicalTimingDialog
+        result = technical_timing.load_timing(ticker) \
+            or technical_timing.load_any_timing(ticker)
+        dlg = TechnicalTimingDialog(ticker, result, self)
+        dlg.open_trade_plan.connect(lambda t=dlg: self._open_trade_plan(ticker))
+        dlg.view_chart.connect(lambda t=dlg: self._view_chart(ticker))
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        main = self.window()
+        if hasattr(main, '_dialogs_set'):
+            main._dialogs_set().add(dlg)
+            dlg.destroyed.connect(lambda obj=None, d=dlg:
+                                  main._dialogs_set().discard(d))
+        dlg.show()
+
+    def _view_chart(self, ticker):
+        from ma_chart_dialog import MAChartDialog
+        try:
+            _, currency = markets.market_currency(ticker)
+        except Exception:  # noqa: BLE001
+            currency = None
+        dlg = MAChartDialog(ticker, currency or markets.USD, '', '',
+                            self.window())
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        main = self.window()
+        if hasattr(main, '_dialogs_set'):
+            main._dialogs_set().add(dlg)
+            dlg.destroyed.connect(lambda obj=None, d=dlg:
+                                  main._dialogs_set().discard(d))
+        dlg.show()
+
+    def _open_trade_plan(self, ticker):
+        """Открыть DealDialog с контекстом Technical timing (Long по умолчанию)."""
+        from DealDialog import DealDialog, DirectionType
+        main = self.window()
+        dlg = DealDialog()
+        if hasattr(main, 'balanceUsd'):
+            dlg.setData(main.balanceUsd())
+        if hasattr(main, 'totalEquityUsd'):
+            dlg.setEquityUsd(main.totalEquityUsd())
+        dlg.setMode(DirectionType.BUY)
+        dlg.ticketEdit.setText(ticker or '')
+        dlg.tickerChanged()
+        dlg.loadTechnicalContext(ticker or '', hint=True)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        if not (hasattr(main, 'data') and hasattr(main, 'debitLong')):
+            return
+        deal = dlg.makeDeal()
+        main.debitLong(deal)
+        main.data.append(deal)
+        main.tradeTableView.model().layoutChanged.emit()
+        main.recalcBalance()
+        main.onTickerAdded(deal.ticker, deal.currency)
+
     def _selected(self):
         row = self.table.currentRow()
         if 0 <= row < len(self._entries):
@@ -387,6 +536,8 @@ class WatchlistDialog(QtWidgets.QDialog):
     def _on_table_double(self, row, col):
         if col == 8:
             self._catalyst()
+        elif col == 9:
+            self._technical()
         elif col in (6, 7):
             self._view_quality()
         else:
@@ -674,6 +825,10 @@ class WatchlistDialog(QtWidgets.QDialog):
             self._test_timer.stop()
         if self._test_timer2 is not None:
             self._test_timer2.stop()
+        if self._timing_loader is not None:
+            if self._timing_loader.isRunning():
+                self._timing_loader.cancel()
+                self._timing_loader.wait(5000)
         if getattr(self, '_goat', None) is not None:
             self._goat.close()
             self._goat.deleteLater()
