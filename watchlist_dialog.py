@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor
 
 import catalyst
+import idea_log
 import markets
 import technical_timing
 import watchlist
@@ -526,6 +527,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         main.tradeTableView.model().layoutChanged.emit()
         main.recalcBalance()
         main.onTickerAdded(deal.ticker, deal.currency)
+        idea_log.log_idea_from_deal(deal)
 
     def _selected(self):
         row = self.table.currentRow()

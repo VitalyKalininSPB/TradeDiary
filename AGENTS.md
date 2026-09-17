@@ -265,6 +265,16 @@ Analysis и остальные экраны не развиваем, не пер
     warning показывает подсказку козы (`_show_goat`). Вызывается из `tickerChanged`
     и `setMode`; кнопка «Open trade plan» в Watchlist зовёт с `hint=True`.
   - Тесты: `tests/test_technical_timing.py` (13, синтетические ряды).
+- **Журнал идей** (`idea_log.py` + `idea_log.db`): append-only SQLite-лог каждого
+  прогона для будущей аналитики. Схема фиксирована, `PRAGMA user_version = 1`.
+  Пишется автоматически при открытии сделки (`main.py: longClicked/shortClicked`,
+  `watchlist_dialog._open_trade_plan`) и при закрытии (`main.py: editClicked`).
+  **Технический снимок (цена vs SMA200, MACD, RSI, статус) фиксируется на дату
+  входа и НЕ пересчитывается** (анти-look-ahead). Фундаментальный снимок — из
+  кэша `company_metrics` (sector_quant.db), без сети. Исход: days, final_pnl_pct,
+  max_adverse_move_pct. `annotate_idea_by_ticker` дозаполняет вероятность/риск/
+  источник; `export_csv` — выгрузка. Данные не удаляются; повторный лог той же
+  идеи обновляет снимки, не дублирует. Тесты: `tests/test_idea_log.py` (9).
 
 ## S&P 500: инструменты и прокси доходности (важно для backtest-запросов)
 

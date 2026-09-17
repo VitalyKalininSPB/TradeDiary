@@ -22,6 +22,7 @@ import price_history
 import simple_mode_settings
 import portfolio_context
 import risk_settings
+import idea_log
 
 log = logging.getLogger(__name__)
 
@@ -936,6 +937,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
+            idea_log.log_idea_from_deal(deal)
         else:
             log.info("Cancel!")
 
@@ -984,6 +986,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
+            idea_log.log_idea_from_deal(deal)
 
     def onTickerAdded(self, ticker, currency):
         price_history.ensure_history(ticker, currency)
@@ -1049,6 +1052,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         if dlg.exec():
             log.info("Success!")
             if deal.close_date:
+                idea_log.close_idea_from_deal(deal)
                 self._creditClose(deal)
                 self.data.remove(deal)
                 self._rebuildChartButtons()
