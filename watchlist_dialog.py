@@ -58,11 +58,11 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
                 self.statusCombo.setCurrentText(entry['status'])
             self.reasonEdit.setText(entry.get('reason') or '')
             self.noteEdit.setPlainText(entry.get('note') or '')
-            self.snapLabel.setText(self._snapshot_text(
-                entry.get('snapshot'), entry.get('date')))
+            self.snapLabel.setText(self._snapshot_text(entry))
         elif snapshot is not None:
             self.snapLabel.setText(self._snapshot_text(
-                snapshot, snapshot.get('date')))
+                {'ticker': ticker or '', 'snapshot': snapshot,
+                 'quant': None, 'qual': None}))
 
         row = QtWidgets.QHBoxLayout()
         ok = QtWidgets.QPushButton('OK')
@@ -75,31 +75,32 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
         form.addRow(row)
 
     @staticmethod
-    def _snapshot_text(snapshot, date):
-        if not snapshot:
-            return 'нет снапшота'
+    def _snapshot_text(entry):
+        snap = (entry or {}).get('snapshot') or {}
+        qn = watchlist.get_quant(entry)
+        ql = watchlist.get_qual(entry)
         parts = []
-        if snapshot.get('qual') is not None:
-            parts.append('Qual: {:.2f}/5'.format(snapshot['qual']))
-        if snapshot.get('quant') is not None:
-            parts.append('Quant: {:+.2f}'.format(snapshot['quant']))
-        if snapshot.get('quant_sector'):
-            parts.append('сектор: {}'.format(snapshot['quant_sector']))
-        cat = snapshot.get('catalyst')
+        if ql is not None and ql.get('score') is not None:
+            parts.append('Qual: {:.2f}/5'.format(ql['score']))
+        if qn is not None and qn.get('score') is not None:
+            parts.append('Quant: {:+.2f}'.format(qn['score']))
+        if qn and qn.get('sector'):
+            parts.append('сектор: {}'.format(qn['sector']))
+        cat = snap.get('catalyst')
         if isinstance(cat, dict) and cat.get('count'):
             parts.append('Catalyst: {} событий · ближайшее {} · макс {}/5'
                          .format(cat['count'], cat.get('next', '-'),
                                  cat.get('max', '-')))
         elif isinstance(cat, (int, float)):
             parts.append('Catalyst: {:.2f}/5'.format(cat))
-        q = snapshot.get('quality')
+        q = (ql or {}).get('report')
         if q:
             snippet = q.replace('\n', ' ').strip()
             parts.append('Quality: {}…'.format(snippet[:60]))
         if not parts:
             return 'нет снапшота'
-        if date:
-            parts.append('дата: {}'.format(date))
+        if entry and entry.get('date'):
+            parts.append('дата: {}'.format(entry['date']))
         return ' · '.join(parts)
 
     def values(self):
@@ -230,9 +231,10 @@ class WatchlistDialog(QtWidgets.QDialog):
         self.table.setRowCount(len(entries))
         today = datetime.date.today().isoformat()
         for r, e in enumerate(entries):
-            snap = e.get('snapshot') or {}
-            quant_ok = snap.get('quant') is not None
-            qual_ok = snap.get('qual') is not None or bool(snap.get('quality'))
+            qn = watchlist.get_quant(e)
+            ql = watchlist.get_qual(e)
+            quant_ok = qn is not None
+            qual_ok = ql is not None
             summary = catalyst.summary_for(e.get('ticker', ''))
             cat_txt = ''
             if summary:
@@ -243,9 +245,9 @@ class WatchlistDialog(QtWidgets.QDialog):
                 e.get('status', watchlist.DEFAULT_STATUS),
                 e.get('date', ''),
                 e.get('reason', ''),
-                self._fmt(snap.get('quant')),
+                self._fmt((qn or {}).get('score')),
                 '💡' if quant_ok else '—',
-                self._fmt(snap.get('qual'), '/5'),
+                self._fmt((ql or {}).get('score'), '/5'),
                 '💡' if qual_ok else '—',
                 cat_txt,
                 e.get('note', ''),
@@ -396,8 +398,8 @@ class WatchlistDialog(QtWidgets.QDialog):
         entry = self._selected()
         if entry is None:
             return
-        snap = entry.get('snapshot') or {}
-        text = snap.get('quality')
+        ql = watchlist.get_qual(entry) or {}
+        text = ql.get('report')
         if not text:
             QtWidgets.QMessageBox.information(
                 self, 'Qual Assessment',
@@ -456,7 +458,7 @@ class WatchlistDialog(QtWidgets.QDialog):
             lbl.setStyleSheet('color: {};'.format(_TXT))
             lay.addWidget(lbl)
 
-        quality_html = snap.get('quality_html')
+        quality_html = ql.get('report_html')
         html_has_text = bool(re.sub(r'<[^>]+>', '', quality_html or '').strip())
         if thesis or html_has_text:
             head = QtWidgets.QLabel('Quality Assessment:')

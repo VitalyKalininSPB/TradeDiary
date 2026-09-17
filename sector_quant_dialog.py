@@ -140,6 +140,34 @@ class _TickerAnalyzeThread(QtCore.QThread):
                    if r.get('forward_pe') is not None]
             row['pct_pe'] = (company_quant._percentile(fp, pes)
                              if fp is not None else None)
+            # Включить сам тикер в ранжирование сектора, чтобы получить
+            # реальный quant-скор (score_rounded) для записи в Watchlist.
+            bench1m = inputs[0].get('benchmarkReturn1mPct') if inputs else None
+            bench1y = inputs[0].get('benchmarkReturn1yPct') if inputs else None
+            mine_input = {
+                'ticker': ticker,
+                'companyName': metrics.get('company_name') or ticker,
+                'sector': sector,
+                'netMarginPct': metrics.get('net_margin'),
+                'netMarginYoyChangePp': metrics.get('net_margin_yoy'),
+                'return1mPct': metrics.get('return_1m'),
+                'return1yPct': metrics.get('return_1y'),
+                'benchmarkReturn1mPct': bench1m,
+                'benchmarkReturn1yPct': bench1y,
+                'forwardPE': metrics.get('forward_pe'),
+                'forwardEPSGrowth': metrics.get('eps_growth'),
+                'revenueGrowthPct': metrics.get('revenue_growth'),
+                'roicPct': metrics.get('roic'),
+                'debtEquity': metrics.get('debt_equity'),
+            }
+            all_ranked = company_quant.rank_companies(inputs + [mine_input])
+            mine = [r for r in all_ranked
+                    if r.get('ticker') == ticker
+                    and r.get('score_rounded') is not None]
+            if mine:
+                row['score_rounded'] = mine[0]['score_rounded']
+                row['company_score'] = mine[0]['company_score']
+                row['rank'] = mine[0].get('rank')
         return row, sector
 
 

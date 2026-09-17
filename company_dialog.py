@@ -37,6 +37,19 @@ _GOAT_LIMIT = 2
 _GOAT_SHOWN = {}
 
 
+def _interest_coverage_status(ic):
+    """Информационный статус Interest coverage (не влияет на скор)."""
+    if ic is None:
+        return '-'
+    if ic >= 5.0:
+        return 'Comfortable'
+    if ic >= 2.0:
+        return 'Acceptable'
+    if ic >= 1.5:
+        return 'Tight'
+    return 'Weak'
+
+
 class _CompanyDataThread(QtCore.QThread):
     """Обновление живых метрик компаний (не чаще раза в день) в фоне."""
 
@@ -277,6 +290,12 @@ class CompanyScreenDialog(QtWidgets.QDialog):
             lines.append('• ROIC: {:+.1f}%'.format(roic))
         else:
             lines.append('• ROIC: -')
+        ic = s.get('interest_coverage')
+        if ic is not None:
+            lines.append('• Interest coverage: {:.1f}× → {}'.format(
+                ic, _interest_coverage_status(ic)))
+        else:
+            lines.append('• Interest coverage: -')
         de = s.get('debt_equity')
         pct_debt = s.get('pct_debt')
         if de is not None and pct_debt is not None:
@@ -452,16 +471,20 @@ class CompanyScreenDialog(QtWidgets.QDialog):
                 quant = float(score_item.text())
             except ValueError:
                 quant = None
-        snapshot = {'quant': quant, 'quant_sector': self._sector}
-        from watchlist import add as watchlist_add
         from watchlist_dialog import WatchlistEntryDialog
-        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snapshot,
-                                   parent=self)
+        dlg = WatchlistEntryDialog(ticker=ticker, parent=self)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
-        res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'],
-                            snapshot=snapshot)
+        from watchlist import add as watchlist_add
+        res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'])
+        if quant is not None:
+            import datetime
+            from watchlist import set_quant_snapshot
+            set_quant_snapshot(
+                v['ticker'], quant,
+                sector=self._sector,
+                date=datetime.date.today().isoformat())
         QtWidgets.QMessageBox.information(
             self, 'Watchlist',
             '{} {} в watchlist{}.'.format(

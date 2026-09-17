@@ -511,25 +511,27 @@ class QualitativeAssessmentDialog(QDialog):
         if not ticker:
             return
         import datetime
-        from watchlist import find as watchlist_find
-        from watchlist import add as watchlist_add
-        existing = watchlist_find(ticker) or {}
-        snap = dict(existing.get('snapshot') or {})
+        from watchlist import set_qual_snapshot
         ratings = [r for r in self._ratings if r > 0]
         qual = (sum(ratings) / len(ratings)) if ratings else 0.0
-        snap['qual'] = round(qual, 2)
-        snap['date'] = datetime.date.today().isoformat()
-        snap['quality'] = self._report_text()
+        qual_snap = {'qual': round(qual, 2),
+                     'quality': self._report_text(),
+                     'date': datetime.date.today().isoformat()}
         if self._quality_html:
-            snap['quality_html'] = self._quality_html
+            qual_snap['quality_html'] = self._quality_html
         from watchlist_dialog import WatchlistEntryDialog
-        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=snap,
+        dlg = WatchlistEntryDialog(ticker=ticker, snapshot=qual_snap,
                                    parent=self)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
-        res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'],
-                            snapshot=snap)
+        from watchlist import add as watchlist_add
+        res = watchlist_add(v['ticker'], v['status'], v['note'], v['reason'])
+        set_qual_snapshot(
+            v['ticker'], round(qual, 2),
+            report=self._report_text() or None,
+            report_html=self._quality_html or None,
+            date=datetime.date.today().isoformat())
         self.beginButton.setText('Added to Watchlist')
         self.beginButton.setEnabled(False)
         QtWidgets.QMessageBox.information(
@@ -562,9 +564,9 @@ class QualitativeAssessmentDialog(QDialog):
         if not self._ticker:
             return
         from watchlist import find as watchlist_find
+        from watchlist import get_quant
         entry = watchlist_find(self._ticker) or {}
-        snap = entry.get('snapshot') or {}
-        if snap.get('quant') is None:
+        if get_quant(entry) is None:
             self._show_goat(
                 'Warning: Qualitative Assessment для {} без пройденного '
                 'Quant Assessment. Сначала пройди Quant (Сравнение с '
@@ -750,27 +752,24 @@ class QualitativeAssessmentDialog(QDialog):
     def _auto_save_to_watchlist(self):
         """Сохранить Qual-результат в Watchlist ТОЛЬКО при финише.
 
-        Мержит с существующим snapshot (quant, catalyst и т.п. не теряются).
+        Пишет отдельный Qual-снапшот (quant/катализаторы не затрагиваются).
         Если ничего не оценено (все звёзды 0 и нет тезиса) — запись не трогаем,
         чтобы пустой прогон не затирал уже сохранённое.
         """
         if not self._ticker:
             return
         import datetime
-        from watchlist import find as watchlist_find
-        from watchlist import add as watchlist_add
+        from watchlist import set_qual_snapshot
         ratings = [r for r in self._ratings if r > 0]
         qual = (sum(ratings) / len(ratings)) if ratings else 0.0
         if qual <= 0 and not self._quality and not self._quality_html:
             return
-        existing = watchlist_find(self._ticker) or {}
-        snap = dict(existing.get('snapshot') or {})
-        snap['qual'] = round(qual, 2)
-        snap['date'] = datetime.date.today().isoformat()
-        snap['quality'] = self._report_text()
-        if self._quality_html:
-            snap['quality_html'] = self._quality_html
         try:
-            watchlist_add(self._ticker, snapshot=snap)
+            set_qual_snapshot(
+                self._ticker,
+                round(qual, 2),
+                report=self._report_text() or None,
+                report_html=self._quality_html or None,
+                date=datetime.date.today().isoformat())
         except (OSError, ValueError) as exc:
             print('Watchlist save failed: {}'.format(exc))

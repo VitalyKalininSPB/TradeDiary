@@ -80,6 +80,8 @@ def _conn():
         conn.execute("ALTER TABLE company_metrics ADD COLUMN short_ratio REAL")
     if cols and 'short_date' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN short_date TEXT")
+    if cols and 'interest_coverage' not in cols:
+        conn.execute("ALTER TABLE company_metrics ADD COLUMN interest_coverage REAL")
     if cols and 'data_status' not in cols:
         conn.execute("ALTER TABLE company_metrics ADD COLUMN data_status TEXT")
     return conn
@@ -192,6 +194,7 @@ def fetch_company_metrics(ticker):
          'revenue_growth': sa['revenue_growth'],
          'roic': (st or {}).get('roic'),
          'debt_equity': (st or {}).get('debt_equity'),
+         'interest_coverage': (st or {}).get('interest_coverage'),
          'earnings_date': (st or {}).get('earnings_date'),
          'surprise_avg': (eh or {}).get('surprise_avg'),
          'surprise_last': (eh or {}).get('surprise_last'),
@@ -323,7 +326,8 @@ def _stat_value(html, stat_id):
 
 
 def _stockanalysis_statistics(ticker):
-    """ROIC (%, TTM), Debt/Equity, дата отчёта и Short Interest из statistics."""
+    """ROIC (%, TTM), Debt/Equity, Interest coverage, дата отчёта и Short
+    Interest из statistics."""
     r = _get('https://stockanalysis.com/stocks/{}/statistics/'.format(
         ticker.lower()))
     html = r.text
@@ -337,6 +341,9 @@ def _stockanalysis_statistics(ticker):
     debt_equity = _stat_value(html, 'debtEquity')
     if debt_equity is not None and not (debt_equity >= 0.0):
         debt_equity = None
+    interest_coverage = _stat_value(html, 'interestCoverage')
+    if interest_coverage is not None and not (interest_coverage >= 0.0):
+        interest_coverage = None
     earnings_date = None
     ed = re.search(r'id:"earningsdate"[^}]*?value:"([^"]+)"', html)
     if ed:
@@ -359,6 +366,7 @@ def _stockanalysis_statistics(ticker):
         if cur is not None and prev is not None and prev > 0:
             short_change = (cur - prev) / prev * 100.0
     return {'roic': roic, 'debt_equity': debt_equity,
+            'interest_coverage': interest_coverage,
             'earnings_date': earnings_date,
             'short_float': short_float, 'short_ratio': short_ratio,
             'short_change': short_change}
@@ -532,7 +540,8 @@ def _metrics_cached(ticker):
         row = conn.execute(
             "SELECT net_margin, net_margin_yoy, return_1m, return_1y, "
             "forward_pe, eps_growth, revenue_growth, roic, debt_equity, "
-            "trailing_pe, trailing_eps_growth, surprise_avg, surprise_last, "
+            "interest_coverage, trailing_pe, trailing_eps_growth, "
+            "surprise_avg, surprise_last, "
             "surprise_n, earnings_date, short_float, short_change, "
             "short_ratio, short_date, data_status, fetched_at "
             "FROM company_metrics WHERE ticker=?", (ticker,)).fetchone()
@@ -541,26 +550,27 @@ def _metrics_cached(ticker):
     if row is None:
         return None
     try:
-        fetched = datetime.datetime.fromisoformat(row[20])
+        fetched = datetime.datetime.fromisoformat(row[21])
     except ValueError:
         return None
     data_status = None
-    if row[19]:
+    if row[20]:
         try:
             import json
-            data_status = json.loads(row[19])
+            data_status = json.loads(row[20])
         except (TypeError, ValueError):
             data_status = None
     return {'net_margin': row[0], 'net_margin_yoy': row[1],
             'return_1m': row[2], 'return_1y': row[3],
             'forward_pe': row[4], 'eps_growth': row[5],
             'revenue_growth': row[6], 'roic': row[7],
-            'debt_equity': row[8], 'trailing_pe': row[9],
-            'trailing_eps_growth': row[10], 'surprise_avg': row[11],
-            'surprise_last': row[12], 'surprise_n': row[13],
-            'earnings_date': row[14], 'short_float': row[15],
-            'short_change': row[16], 'short_ratio': row[17],
-            'short_date': row[18], 'data_status': data_status,
+            'debt_equity': row[8], 'interest_coverage': row[9],
+            'trailing_pe': row[10],
+            'trailing_eps_growth': row[11], 'surprise_avg': row[12],
+            'surprise_last': row[13], 'surprise_n': row[14],
+            'earnings_date': row[15], 'short_float': row[16],
+            'short_change': row[17], 'short_ratio': row[18],
+            'short_date': row[19], 'data_status': data_status,
             'fetched_at': fetched}
 
 
@@ -573,15 +583,17 @@ def _save_metrics(ticker, sector, metrics):
             "INSERT OR REPLACE INTO company_metrics "
             "(ticker, sector, net_margin, net_margin_yoy, return_1m, "
             "return_1y, forward_pe, eps_growth, revenue_growth, roic, "
-            "debt_equity, trailing_pe, trailing_eps_growth, surprise_avg, "
+            "debt_equity, interest_coverage, trailing_pe, "
+            "trailing_eps_growth, surprise_avg, "
             "surprise_last, surprise_n, earnings_date, short_float, "
             "short_change, short_ratio, short_date, data_status, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticker, sector, metrics['net_margin'], metrics['net_margin_yoy'],
              metrics['return_1m'], metrics['return_1y'],
              metrics['forward_pe'], metrics['eps_growth'],
              metrics.get('revenue_growth'), metrics.get('roic'),
-             metrics.get('debt_equity'), metrics.get('trailing_pe'),
+             metrics.get('debt_equity'), metrics.get('interest_coverage'),
+             metrics.get('trailing_pe'),
              metrics.get('trailing_eps_growth'),
              metrics.get('surprise_avg'), metrics.get('surprise_last'),
              metrics.get('surprise_n'), metrics.get('earnings_date'),
@@ -627,6 +639,7 @@ def _apply_metrics(c, m):
         c['revenueGrowthPct'] = m.get('revenue_growth')
         c['roicPct'] = m.get('roic')
         c['debtEquity'] = m.get('debt_equity')
+        c['interestCoverage'] = m.get('interest_coverage')
         c['surpriseAvg'] = m.get('surprise_avg')
         c['surpriseLast'] = m.get('surprise_last')
         c['surpriseN'] = m.get('surprise_n')

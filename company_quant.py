@@ -202,6 +202,7 @@ def _evaluate(c):
         'revenue_growth': c.get('revenueGrowthPct'),
         'sector_median_rev_growth': None, 'pct_rev_growth': None,
         'roic': c.get('roicPct'), 'debt_equity': c.get('debtEquity'),
+        'interest_coverage': c.get('interestCoverage'),
         'sector_median_roic': None, 'pct_roic': None,
         'sector_median_debt': None, 'pct_debt': None,
         'company_score': None, 'score_rounded': None, 'rank': None,
@@ -242,6 +243,9 @@ def _evaluate(c):
     if e['debt_equity'] is not None and not _finite(e['debt_equity']):
         e['warnings'].append('non_finite_debt_equity')
         e['debt_equity'] = None
+    if e['interest_coverage'] is not None and not _finite(e['interest_coverage']):
+        e['warnings'].append('non_finite_interest_coverage')
+        e['interest_coverage'] = None
     e['_rankable'] = True
     return e
 

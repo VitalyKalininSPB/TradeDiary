@@ -153,15 +153,15 @@ class DealDialog(QDialog):
     def _assessments_ok(self):
         """Для сделки нужны оба Assessment: Quant и Qual (в watchlist)."""
         from watchlist import find as watchlist_find
+        from watchlist import get_quant, get_qual
         ticker = (self.ticketEdit.text() or '').strip().upper()
         if not ticker:
             return True, ''
         entry = watchlist_find(ticker) or {}
-        snap = entry.get('snapshot') or {}
         missing = []
-        if snap.get('quant') is None:
+        if get_quant(entry) is None:
             missing.append('Quant')
-        if snap.get('qual') is None and not snap.get('quality'):
+        if get_qual(entry) is None:
             missing.append('Qual')
         if missing:
             names = ' и '.join(missing)

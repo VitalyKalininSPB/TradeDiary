@@ -762,13 +762,49 @@ class RecommendationDialog(QtWidgets.QDialog):
         self._watchlistButton.setEnabled(not present)
 
     def _add_to_watchlist(self):
-        ok, msg = add_to_watchlist_safe(self._ticker)
-        if not ok:
-            QtWidgets.QMessageBox.critical(
-                self, 'Watchlist', msg)
+        """Сохранить тикер в Watchlist с отдельным Quant-снапшотом.
+
+        Qual-снапшот не затрагивается. Для новых записей — добавить,
+        для существующих — обновить только Quant.
+        """
+        ticker = self._ticker
+        if not ticker:
             return
-        QtWidgets.QMessageBox.information(self, 'Watchlist', msg)
+        import datetime
+        from watchlist import set_quant_snapshot
+        e = self._e or {}
+        quant = e.get('score_rounded')
+        if quant is None:
+            cs = e.get('company_score')
+            quant = round(cs, 2) if isinstance(cs, (int, float)) else None
+        if quant is None:
+            QtWidgets.QMessageBox.information(
+                self, 'Watchlist',
+                'Quant-скор для {} недоступен — тикер добавлен без Quant.'.format(
+                    ticker))
+            res = self._add_bare_watchlist_entry()
+        else:
+            try:
+                res = set_quant_snapshot(
+                    ticker, quant,
+                    sector=e.get('sector'),
+                    date=datetime.date.today().isoformat())
+            except (OSError, ValueError) as exc:
+                QtWidgets.QMessageBox.critical(
+                    self, 'Watchlist',
+                    'Не удалось сохранить watchlist: {}'.format(exc))
+                return
+            QtWidgets.QMessageBox.information(
+                self, 'Watchlist',
+                '{} {} в watchlist (Quant {:.2f}).'.format(
+                    ticker, 'добавлен' if res == 'added' else 'обновлён',
+                    quant))
         self._refresh_watchlist_button()
+
+    def _add_bare_watchlist_entry(self):
+        """Добавить запись без Quant-скора (snapshot не трогается)."""
+        from watchlist import add as watchlist_add
+        return watchlist_add(self._ticker)
 
     def _on_mode_changed(self, on):
         if on == self._simple:
