@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from deals import Deal, Direction, TRADE_SYSTEMS, trade_system_name
 import markets
 import logo
+import risk_plan
+import risk_settings
 
 class DirectionType(Enum):
     BUY = 1
@@ -84,14 +86,107 @@ class DealDialog(QDialog):
         self.priceEdit.editingFinished.connect(self.priceChanged)
         self.stoplossEdit.editingFinished.connect(self.stopLossChanged)
         self.takeprofitEdit.editingFinished.connect(self.takeProfitChanged)
+        self.amountEdit.editingFinished.connect(self._on_risk_input_changed)
+        self.priceEdit.editingFinished.connect(self._on_risk_input_changed)
+        self.stoplossEdit.editingFinished.connect(self._on_risk_input_changed)
+        self.desiredNotionalEdit.editingFinished.connect(
+            self.desiredNotionalChanged)
 
         self.openDate = datetime.now()
         self.openDateLabel.setText(self.openDate.strftime("%d/%m/%Y %H:%M"))
 
+        self._equity_usd = 0.0
+        self._updating_risk = False
+        self._update_risk_plan()
 
     def setData(self, balance):
         self._balance = balance
         print("Balance === " + str(self._balance))
+
+    def setEquityUsd(self, equity_usd):
+        self._equity_usd = float(equity_usd or 0.0)
+        self._update_risk_plan()
+
+    # --------------------------------------------------------- risk planning
+    def _deal_currency(self):
+        return getattr(self, '_currency', '') or ''
+
+    def _usd_rate(self):
+        if self._deal_currency() == markets.RUB:
+            rate = markets.fetch_usd_rate()
+            return rate if rate else 1.0
+        return 1.0
+
+    def _update_risk_plan(self):
+        """Пересчитать блок «Risk plan» из текущих полей формы."""
+        if self._updating_risk:
+            return
+        try:
+            entry = float(self.priceEdit.text()) if self.priceEdit.text() else 0.0
+            stop = float(self.stoplossEdit.text()) if self.stoplossEdit.text() else 0.0
+            amount = float(self.amountEdit.text()) if self.amountEdit.text() else 0.0
+        except ValueError:
+            entry = stop = amount = 0.0
+        direction = getattr(self, '_direction', Direction.LONG)
+        plan = risk_plan.build_risk_plan(
+            entry, stop, amount, direction,
+            self._equity_usd, usd_rate=self._usd_rate(),
+            max_notional_usd=risk_settings.max_notional_per_idea_usd(),
+            max_risk_pct=risk_settings.max_risk_per_trade_pct())
+        m = plan['metrics']
+        sign = markets.CURRENCY_SIGN.get(self._deal_currency(), 'pt')
+        self.riskPerShareLabel.setText(
+            'Risk per share: {}{:.2f}'.format(sign, m['risk_per_share']))
+        self.positionValueLabel.setText(
+            'Position value: {}{:,.0f}'.format(sign, m['position_value']))
+        if plan['risk_pct'] is not None:
+            self.riskAtStopLabel.setText(
+                'Risk at stop: {}{:,.0f} ({:.2f}% of equity)'.format(
+                    sign, m['risk_at_stop'], plan['risk_pct']))
+        else:
+            self.riskAtStopLabel.setText(
+                'Risk at stop: {}{:,.0f}'.format(sign, m['risk_at_stop']))
+        self.stopLossErrorLabel.setText('')
+        for b in plan['blockers']:
+            if b.startswith('Stop-loss'):
+                self.stopLossErrorLabel.setText(b)
+                break
+        if plan['warnings']:
+            self.riskWarnLabel.setText('\n'.join(plan['warnings']))
+            self.riskWarnLabel.setStyleSheet('color: #f0c14b;')
+        else:
+            self.riskWarnLabel.setText('')
+            self.riskWarnLabel.setStyleSheet('')
+
+    def _on_risk_input_changed(self):
+        self._update_risk_plan()
+
+    def desiredNotionalChanged(self):
+        """Пользователь ввёл желаемую сумму в USD -> пересчитать количество."""
+        if self._updating_risk:
+            return
+        try:
+            desired = float(self.desiredNotionalEdit.text())
+        except ValueError:
+            return
+        if desired <= 0:
+            return
+        entry_usd = 0.0
+        try:
+            entry = float(self.priceEdit.text()) if self.priceEdit.text() else 0.0
+            entry_usd = entry / self._usd_rate()
+        except (ValueError, ZeroDivisionError):
+            entry_usd = 0.0
+        qty = risk_plan.quantity_from_notional(desired, entry_usd)
+        if qty is None or qty <= 0:
+            self._update_risk_plan()
+            return
+        self._updating_risk = True
+        try:
+            self.amountEdit.setText(str(qty))
+        finally:
+            self._updating_risk = False
+        self._update_risk_plan()
 
     def setMode(self, mode):
         if mode == DirectionType.BUY:
@@ -120,6 +215,7 @@ class DealDialog(QDialog):
     def okPressed(self):
         print('Accept')
         deal = self.makeDeal()
+        self._equity_usd = getattr(self, '_equity_usd', 0.0) or 0.0
         if not FutureUtil.is_future(deal):
             ok, reason = self._assessments_ok()
             if not ok:
@@ -131,10 +227,32 @@ class DealDialog(QDialog):
                     'Assessment — только потом открывай сделку.'.format(
                         reason, deal.ticker))
                 return
+        plan = risk_plan.build_risk_plan(
+            deal.stock_price, deal.stop_loss, deal.amount,
+            deal.direction, self._equity_usd, usd_rate=self._usd_rate(),
+            max_notional_usd=risk_settings.max_notional_per_idea_usd(),
+            max_risk_pct=risk_settings.max_risk_per_trade_pct())
+        if not plan['ok']:
+            self.infoLabel.setText('; '.join(plan['blockers']))
+            self._update_risk_plan()
+            return
+        warnings = list(plan['warnings'])
+        if warnings:
+            self.infoLabel.setText('\n'.join(warnings))
+            print('Risk plan warnings')
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                'Risk warning',
+                '\n'.join(warnings) + '\n\nDo you want to continue?',
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if choice != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
         self.riskManager = RiskManager()
-        self.riskManager.balance = 0 #self._balance
-        self.riskManager.deal = self.makeDeal();
         self.riskManager.balance = self._balance
+        self.riskManager.deal = self.makeDeal()
         if self.riskManager.checkRisk():
             self.accept()
         else:

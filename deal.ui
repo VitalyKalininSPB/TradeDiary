@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>600</width>
-    <height>446</height>
+    <height>700</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -139,22 +139,6 @@
    </property>
    <property name="text">
     <string>Ticker:</string>
-   </property>
-  </widget>
-  <widget class="QDialogButtonBox" name="buttonBox_2">
-   <property name="geometry">
-    <rect>
-     <x>10</x>
-     <y>400</y>
-     <width>341</width>
-     <height>32</height>
-    </rect>
-   </property>
-   <property name="orientation">
-    <enum>Qt::Horizontal</enum>
-   </property>
-   <property name="standardButtons">
-    <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
    </property>
   </widget>
   <widget class="QLineEdit" name="amountEdit">
@@ -311,7 +295,7 @@
    <property name="geometry">
     <rect>
      <x>120</x>
-     <y>220</y>
+     <y>245</y>
      <width>121</width>
      <height>17</height>
     </rect>
@@ -324,13 +308,136 @@
    <property name="geometry">
     <rect>
      <x>360</x>
-     <y>220</y>
+     <y>245</y>
      <width>121</width>
      <height>17</height>
     </rect>
    </property>
    <property name="text">
     <string>TextLabel</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="desiredNotionalLabel">
+   <property name="geometry">
+    <rect>
+     <x>5</x>
+     <y>159</y>
+     <width>160</width>
+     <height>17</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Desired amount (USD):</string>
+   </property>
+  </widget>
+  <widget class="QLineEdit" name="desiredNotionalEdit">
+   <property name="geometry">
+    <rect>
+     <x>175</x>
+     <y>154</y>
+     <width>111</width>
+     <height>25</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QLabel" name="stopLossErrorLabel">
+   <property name="geometry">
+    <rect>
+     <x>120</x>
+     <y>214</y>
+     <width>320</width>
+     <height>17</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string>color: #ef5350; font-size: 11px;</string>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QGroupBox" name="riskPlanGroup">
+   <property name="geometry">
+    <rect>
+     <x>20</x>
+     <y>400</y>
+     <width>560</width>
+     <height>250</height>
+    </rect>
+   </property>
+   <property name="title">
+    <string>Risk plan</string>
+   </property>
+   <widget class="QLabel" name="riskPerShareLabel">
+    <property name="geometry">
+     <rect>
+      <x>15</x>
+      <y>30</y>
+      <width>520</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Risk per share: —</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="positionValueLabel">
+    <property name="geometry">
+     <rect>
+      <x>15</x>
+      <y>60</y>
+      <width>520</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Position value: —</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="riskAtStopLabel">
+    <property name="geometry">
+     <rect>
+      <x>15</x>
+      <y>90</y>
+      <width>520</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Risk at stop: —</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="riskWarnLabel">
+    <property name="geometry">
+     <rect>
+      <x>15</x>
+      <y>120</y>
+      <width>520</width>
+      <height>110</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+    <property name="wordWrap">
+     <bool>true</bool>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QDialogButtonBox" name="buttonBox_2">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>660</y>
+     <width>341</width>
+     <height>32</height>
+    </rect>
+   </property>
+   <property name="orientation">
+    <enum>Qt::Horizontal</enum>
+   </property>
+   <property name="standardButtons">
+    <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
    </property>
   </widget>
  </widget>

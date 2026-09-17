@@ -20,6 +20,8 @@ import risk
 import markets
 import price_history
 import simple_mode_settings
+import portfolio_context
+import risk_settings
 
 log = logging.getLogger(__name__)
 
@@ -307,6 +309,8 @@ class TradeDiary(QtWidgets.QMainWindow):
     def _on_simple_mode_changed(self, on):
         """Синхронизировать тумблер, если режим поменяли вне главного окна."""
         self.simpleModeButton.setChecked(on)
+        if hasattr(self, 'portfolioContextFrame'):
+            self.portfolioContextFrame.setVisible(on)
 
     def _rebuildChartButtons(self):
         for w in self._chartButtons:
@@ -410,6 +414,81 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.corrProgressBar.setToolTip(
             '{} asset(s), portfolio correlation {:.2f}\n{}'
             .format(len(tickers), corr, tip))
+        self._update_portfolio_context()
+
+    def _open_idea_usd_by_ticker(self):
+        """Стоимость открытых позиций по тикерам (USD)."""
+        rate = markets.fetch_usd_rate()
+        usd = {}
+        for deal in self.data:
+            if deal.close_date:
+                continue
+            ticker = deal.ticker.strip()
+            amount = deal.amount
+            price = deal.stock_price
+            if not ticker or amount <= 0 or price <= 0:
+                continue
+            currency = deal.currency.strip() or markets.USD
+            if currency == markets.RUB:
+                value = price * amount / rate if rate else 0.0
+            else:
+                value = price * amount
+            usd[ticker] = usd.get(ticker, 0.0) + value
+        return usd
+
+    def _market_context_text(self):
+        """Компактная строка рыночного контекста (информационная)."""
+        parts = []
+        regime = getattr(self, '_regime_name', None)
+        if regime == 'bull':
+            parts.append('bull regime')
+        elif regime == 'bear':
+            parts.append('bear regime')
+        else:
+            parts.append('neutral')
+        if getattr(self, '_late_cycle', False):
+            parts.append('late-cycle')
+        return 'Market context: ' + ', '.join(parts)
+
+    def _update_portfolio_context(self):
+        """Заполнить компактную панель «Portfolio context» (Simple Mode)."""
+        if not hasattr(self, 'portfolioContextFrame'):
+            return
+        usd_by_ticker = self._open_idea_usd_by_ticker()
+        open_count = len([t for t in usd_by_ticker if usd_by_ticker[t] > 0])
+        ctx = portfolio_context.build_portfolio_context(
+            open_count, usd_by_ticker, self.totalEquityUsd(),
+            getattr(self, '_portfolio_corr', 0.0))
+        lines = []
+        if ctx['open_count'] is not None:
+            status = ctx['open_status']
+            label = {'normal': 'Normal', 'low': 'Info',
+                     'review': 'Review'}.get(status, status)
+            lines.append('Open ideas: {} (usual range: 5–8) · {}'.format(
+                open_count, label))
+            if ctx['open_note']:
+                lines.append('    ' + ctx['open_note'])
+        largest = ctx['largest']
+        if largest:
+            ticker, value, pct = largest
+            pct_txt = ('{:.1f}% of equity'.format(pct)
+                       if pct is not None else '—')
+            lines.append('Largest idea: {} — ${:,.0f} ({})'.format(
+                ticker, value, pct_txt))
+        conc = ctx['concentration']
+        if conc == 'unknown':
+            lines.append('Concentration: —')
+        else:
+            color = {'normal': '#81c784', 'elevated': '#f0c14b',
+                     'high': '#ef5350'}.get(conc, '#dcdce0')
+            lines.append('Concentration: <b style="color:{}">{}</b>'.format(
+                color, ctx['concentration_ru']))
+            if ctx['concentration_note']:
+                lines.append('    ' + ctx['concentration_note'])
+        lines.append(self._market_context_text())
+        self.portfolioContextLabel.setText('<br>'.join(lines))
+        self.portfolioContextLabel.setTextFormat(
+            QtCore.Qt.TextFormat.RichText)
 
     def _assetWeightsUsd(self, assets):
         """USD-value-weighted position shares for the given open assets."""
@@ -666,6 +745,7 @@ class TradeDiary(QtWidgets.QMainWindow):
 
     def _applyRegimeIcon(self, name):
         """Show the bull/bear icon next to the thermometer (NASDAQ regime)."""
+        self._regime_name = name or None
         from index_dialog import _regime_icon
         name = name or None
         pm = _regime_icon(name) if name else None
@@ -747,6 +827,24 @@ class TradeDiary(QtWidgets.QMainWindow):
             bottom_row1.addWidget(w)
         bottom_row1.addStretch(1)
 
+        self.portfolioContextFrame = QtWidgets.QFrame()
+        self.portfolioContextFrame.setStyleSheet(
+            'QFrame { background: #16171b; border: 1px solid #43464f; '
+            'border-radius: 6px; }')
+        pclay = QtWidgets.QVBoxLayout(self.portfolioContextFrame)
+        pclay.setContentsMargins(10, 6, 10, 6)
+        pclay.setSpacing(2)
+        self.portfolioContextTitle = QtWidgets.QLabel('Portfolio context')
+        self.portfolioContextTitle.setStyleSheet(
+            'color: #dcdce0; font-weight: bold; font-size: 12px;')
+        pclay.addWidget(self.portfolioContextTitle)
+        self.portfolioContextLabel = QtWidgets.QLabel('')
+        self.portfolioContextLabel.setWordWrap(True)
+        self.portfolioContextLabel.setStyleSheet(
+            'color: #dcdce0; font-size: 11px;')
+        pclay.addWidget(self.portfolioContextLabel)
+        self.portfolioContextFrame.setVisible(
+            simple_mode_settings.is_simple_enabled())
         bottom_row2 = QtWidgets.QHBoxLayout()
         bottom_row2.setContentsMargins(0, 0, 0, 0)
         bottom_row2.setSpacing(8)
@@ -756,6 +854,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         bottom_row2.addStretch(1)
 
         bottom.addLayout(bottom_row1)
+        bottom.addWidget(self.portfolioContextFrame)
         bottom.addLayout(bottom_row2)
 
         v = QtWidgets.QVBoxLayout(central)
@@ -788,6 +887,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             else:
                 self.holdings_usd += price * amount
         self.updateBalanceDisplay()
+        self._update_portfolio_context()
 
     def totalEquityUsd(self):
         return self.base_balance + self.holdings_usd
@@ -826,6 +926,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         log.info("Long clicked")
         dlg = DealDialog()
         dlg.setData(self.balanceUsd())
+        dlg.setEquityUsd(self.totalEquityUsd())
         dlg.setMode(DirectionType.BUY)
         if dlg.exec():
             log.info("Success!")
@@ -874,6 +975,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         log.info("Short clicked")
         dlg = DealDialog()
         dlg.setData(self.balanceUsd())
+        dlg.setEquityUsd(self.totalEquityUsd())
         dlg.setMode(DirectionType.SELL)
         if dlg.exec():
             log.info("Success!")
@@ -1014,6 +1116,13 @@ class TradeDiary(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self.window(), 'Recalc SL/TP',
                 'No open positions to recalculate.')
+            return
+
+        if simple_mode_settings.is_simple_enabled():
+            QtWidgets.QMessageBox.information(
+                self.window(), 'Recalc SL/TP',
+                'В Simple Mode stop-loss и take-profit задаются вручную — '
+                'автоматический пересчёт отключён.')
             return
 
         equity = self.totalEquityUsd()
