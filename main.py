@@ -13,6 +13,7 @@ from EditDealDialog import EditDealDialog
 from DealDialog import DealDialog
 from DealDialog import DirectionType
 from DealDialog import FutureUtil
+import futures
 
 from deals import Deal, Direction, trade_system_name
 from persistence import load as load_diary, save as save_diary
@@ -367,6 +368,24 @@ class TradeDiary(QtWidgets.QMainWindow):
     def candlesClicked(self, row):
         self._openNonModal('candles', row)
 
+    @staticmethod
+    def _future_value_usd(deal, rate):
+        """Фьючерс: (ГО + накопленный P&L) в USD — то, что «лежит» в позиции."""
+        if not rate:
+            return 0.0
+        margin = futures.margin_rub(deal.amount, deal.margin)
+        pnl = futures.pnl_rub(deal.init_price, deal.stock_price, deal.amount,
+                              deal.direction, deal.point_value)
+        return (margin + pnl) / rate
+
+    @staticmethod
+    def _future_notional_usd(deal, rate):
+        """Фьючерс: номинал позиции в USD (для весов/концентрации)."""
+        if not rate:
+            return 0.0
+        return futures.notional_rub(deal.stock_price, deal.amount,
+                                    deal.point_value) / rate
+
     def openTickers(self):
         """Return {ticker: currency} of currently open portfolio positions."""
         out = {}
@@ -430,7 +449,9 @@ class TradeDiary(QtWidgets.QMainWindow):
             if not ticker or amount <= 0 or price <= 0:
                 continue
             currency = deal.currency.strip() or markets.USD
-            if currency == markets.RUB:
+            if deal.is_future:
+                value = self._future_notional_usd(deal, rate)
+            elif currency == markets.RUB:
                 value = price * amount / rate if rate else 0.0
             else:
                 value = price * amount
@@ -501,7 +522,10 @@ class TradeDiary(QtWidgets.QMainWindow):
                     continue
                 amount = deal.amount
                 price = deal.stock_price
-                if currency == markets.RUB:
+                if deal.is_future:
+                    value += self._future_notional_usd(
+                        deal, markets.fetch_usd_rate())
+                elif currency == markets.RUB:
                     rate = markets.fetch_usd_rate()
                     value += price * amount / rate if rate else 0.0
                 else:
@@ -882,7 +906,9 @@ class TradeDiary(QtWidgets.QMainWindow):
             price = deal.stock_price
             if amount <= 0 or price <= 0:
                 continue
-            if currency == markets.RUB:
+            if deal.is_future:
+                self.holdings_usd += self._future_value_usd(deal, rate)
+            elif currency == markets.RUB:
                 if rate:
                     self.holdings_usd += price * amount / rate
             else:
@@ -941,7 +967,17 @@ class TradeDiary(QtWidgets.QMainWindow):
         else:
             log.info("Cancel!")
 
+    def _debitFutureMargin(self, deal):
+        """Фьючерс (Long и Short): с cash списывается только ГО."""
+        rate = markets.fetch_usd_rate()
+        if rate:
+            self.base_balance -= futures.margin_rub(
+                deal.amount, deal.margin) / rate
+
     def debitLong(self, deal):
+        if deal.is_future:
+            self._debitFutureMargin(deal)
+            return
         cost_usd = None
         if deal.currency == markets.RUB:
             rate = markets.fetch_usd_rate()
@@ -959,6 +995,11 @@ class TradeDiary(QtWidgets.QMainWindow):
         позиции + P&L). SHORT — стоимость выкупа списывается с cash.
         История закрытых сделок будет вестись отдельно (вкладка History).
         """
+        if deal.is_future:
+            # Возвращаем ГО + реализованный P&L (вариационная маржа).
+            self.base_balance += self._future_value_usd(
+                deal, markets.fetch_usd_rate())
+            return
         proceeds_usd = None
         if deal.currency == markets.RUB:
             rate = markets.fetch_usd_rate()
@@ -982,6 +1023,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         if dlg.exec():
             log.info("Success!")
             deal = dlg.makeDeal()
+            if deal.is_future:
+                self._debitFutureMargin(deal)
             self.data.append(deal)
             self.tradeTableView.model().layoutChanged.emit()
             self.recalcBalance()

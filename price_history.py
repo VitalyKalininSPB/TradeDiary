@@ -13,6 +13,7 @@ import requests
 
 import numpy as np
 
+import futures
 import markets
 
 log = logging.getLogger(__name__)
@@ -101,15 +102,23 @@ def _drop_today(series):
 
 
 def _fetch_moex_candles(ticker, ndays):
-    """Paginate MOEX daily candles, return {date: (open, high, low, close)}."""
+    """Paginate MOEX daily candles, return {date: (open, high, low, close)}.
+
+    Фьючерсы FORTS (BR-11.26 / BRX6) берутся с рынка futures/forts по SECID.
+    """
     to = datetime.date.today()
     frm = to - datetime.timedelta(days=int(ndays * _DAY_BUF))
     out = {}
     start = 0
+    if futures.is_supported_future(ticker):
+        base = futures.ISS
+        secid = futures.secid_for(ticker)
+    else:
+        base = 'https://iss.moex.com/iss/engines/stock/markets/shares'
+        secid = ticker
     while True:
-        url = ('https://iss.moex.com/iss/engines/stock/markets/shares/'
-               'securities/{}/candles.json?interval=24&from={}&till={}&start={}'
-               .format(ticker, frm, to, start))
+        url = ('{}/securities/{}/candles.json?interval=24&from={}&till={}&start={}'
+               .format(base, secid, frm, to, start))
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()

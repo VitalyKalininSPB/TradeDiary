@@ -15,6 +15,12 @@ class Direction(str, Enum):
     SHORT = "SHORT"
 
 
+class AssetType(str, Enum):
+    """Тип инструмента. STOCK — акция (по умолчанию), FUTURE — фьючерс FORTS."""
+    STOCK = "STOCK"
+    FUTURE = "FUTURE"
+
+
 TRADE_SYSTEMS = ['Average MA', 'MACD']
 
 
@@ -46,10 +52,20 @@ class Deal:
     notes: str = ""
     currency: str = ""
     direction: Direction = Direction.LONG
+    # Фьючерсы (asset_type=FUTURE): amount = число контрактов, цены — в
+    # единицах котировки (для BR — $/bbl), расчёты — в рублях.
+    asset_type: AssetType = AssetType.STOCK
+    point_value: float = 0.0   # ₽ за 1.0 изменения цены на контракт
+    margin: float = 0.0        # ГО на контракт (₽), зафиксированное при входе
+    expiry: str = ""           # последний день торгов, ISO
 
     @property
     def is_open(self) -> bool:
         return not self.close_date
+
+    @property
+    def is_future(self) -> bool:
+        return self.asset_type == AssetType.FUTURE
 
 
 def infer_direction(deal) -> Direction:

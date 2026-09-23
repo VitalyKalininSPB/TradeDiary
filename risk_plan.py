@@ -7,6 +7,8 @@
 
 `usd_rate` — конвертация цены сделки в USD: price_usd = price / usd_rate.
 Для USD-сделок usd_rate=1.0, для RUB — markets.fetch_usd_rate().
+`multiplier` — для фьючерсов point value (₽ за пункт цены на контракт):
+цена $/bbl × multiplier = ₽ на контракт, дальше / usd_rate -> USD.
 """
 import math
 
@@ -43,12 +45,18 @@ def validate_stop(direction, entry, stop):
     return None
 
 
-def compute_metrics(entry, stop, amount):
-    """Базовые риск-метрики сделки (в валюте сделки)."""
-    rps = abs(entry - stop)
+def compute_metrics(entry, stop, amount, multiplier=1.0):
+    """Базовые риск-метрики сделки (в валюте сделки).
+
+    `multiplier` — стоимость 1.0 изменения цены на единицу количества.
+    Для акций 1.0; для фьючерса — point value контракта (₽ за пункт), тогда
+    risk_per_share = риск на контракт, position_value = номинал в ₽.
+    """
+    multiplier = multiplier or 1.0
+    rps = abs(entry - stop) * multiplier
     return {
         'risk_per_share': rps,
-        'position_value': entry * amount,
+        'position_value': entry * multiplier * amount,
         'risk_at_stop': rps * amount,
     }
 
@@ -71,7 +79,8 @@ def quantity_from_notional(desired_usd, entry_price_usd):
 
 def build_risk_plan(entry, stop, amount, direction, total_equity_usd,
                     usd_rate=1.0, desired_notional_usd=None,
-                    max_notional_usd=10000.0, max_risk_pct=1.0):
+                    max_notional_usd=10000.0, max_risk_pct=1.0,
+                    multiplier=1.0):
     """Полный риск-план сделки.
 
     Возвращает dict:
@@ -94,8 +103,10 @@ def build_risk_plan(entry, stop, amount, direction, total_equity_usd,
     if amount is None or amount <= 0:
         blockers.append(_ERR_AMOUNT)
 
-    price_usd = (entry / usd_rate) if (entry and usd_rate) else 0.0
-    metrics = compute_metrics(entry or 0.0, stop or 0.0, amount or 0.0)
+    multiplier = multiplier or 1.0
+    price_usd = (entry * multiplier / usd_rate) if (entry and usd_rate) else 0.0
+    metrics = compute_metrics(entry or 0.0, stop or 0.0, amount or 0.0,
+                              multiplier)
     position_value_usd = amount * price_usd if amount and price_usd else 0.0
     risk_at_stop_usd = metrics['risk_at_stop'] / usd_rate if usd_rate else 0.0
 

@@ -316,3 +316,24 @@ S&P 4769.83 → 7709.96 (+61.6%), но USD/RUB 90.7 → 81.78 (−9.8%) → чи
 - **Архитектурные решения и «что НЕ делаем»** — живой журнал
   `ARCHITECTURE_DECISIONS.md` (AGENTS.md — только операционное).
 - **Безопасность**: в `opencode.json` лежит API-ключ DeepSeek — не выводи его в логи/коммиты.
+
+## Фьючерсы Brent (FORTS, ветка `brent_futures`)
+
+- Модуль `futures.py` — чистый (requests, без Qt): спецификация контракта с
+  ISS Мосбиржи (`engines/futures/markets/forts`), TTL-кэш 5 мин, денежная
+  математика. Поддерживаемые базы — `SUPPORTED_ASSETS` (пока только `BR`).
+- Ввод тикера: `BR` (ближайший неистёкший), `BR-11.26` или `BRX6`. В сделке
+  хранится SHORTNAME (`BR-11.26`). Спецификация грузится в фоне
+  (`_FutureSpecThread` в DealDialog.py), `done()` ждёт поток.
+- Deal: `asset_type=FUTURE`, `amount` = контракты, цены в $/bbl,
+  `currency=RUB`, `point_value` (₽ за 1$ цены на контракт = STEPPRICE/MINSTEP,
+  ≈10 bbl × USD/RUB), `margin` (ГО ₽/контракт на момент входа), `expiry`.
+  Новые колонки добавляются в `diary.db` через ALTER TABLE автоматически.
+- Учёт в главном окне: при входе (Long и Short) с cash списывается только
+  ГО; holdings = ГО + P&L; при закрытии возвращается ГО + P&L. Веса
+  корреляции/концентрации — по номиналу (price × point_value × qty).
+- Risk plan: `build_risk_plan(..., multiplier=point_value)`. Истёкший
+  контракт блокирует сделку, ≤5 дн. до экспирации — предупреждение.
+  Quant/Qual Assessment для фьючерсов не требуется (как и раньше).
+- Свечи/история: `price_history` для фьючерсов ходит в FORTS candles по SECID.
+- Тесты: `tests/test_futures.py`.

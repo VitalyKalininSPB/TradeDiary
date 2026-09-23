@@ -9,7 +9,7 @@ import os
 import sqlite3
 import xml.dom.minidom
 
-from deals import Deal, Direction, infer_direction
+from deals import AssetType, Deal, Direction, infer_direction
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_DIR, 'diary.db')
@@ -19,6 +19,13 @@ _DEAL_COLS = (
     "ticker", "stock_price", "amount", "open_date", "init_price",
     "take_profit", "stop_loss", "trade_system", "result", "close_date",
     "whats_next", "notes", "currency", "direction",
+    "asset_type", "point_value", "margin", "expiry",
+)
+
+# Колонки, добавленные после первой версии схемы (миграция ALTER TABLE).
+_ADDED_COLS = (
+    ("asset_type", "TEXT"), ("point_value", "REAL"),
+    ("margin", "REAL"), ("expiry", "TEXT"),
 )
 
 
@@ -33,6 +40,10 @@ def _conn():
         "init_price REAL, take_profit REAL, stop_loss REAL, trade_system INTEGER,"
         "result TEXT, close_date TEXT, whats_next TEXT, notes TEXT,"
         "currency TEXT, direction TEXT)")
+    have = {r[1] for r in conn.execute("PRAGMA table_info(deals)")}
+    for name, typ in _ADDED_COLS:
+        if name not in have:
+            conn.execute("ALTER TABLE deals ADD COLUMN {} {}".format(name, typ))
     return conn
 
 
@@ -100,6 +111,10 @@ def _row_to_deal(row):
         direction=Direction(row[13]) if row[13] in (Direction.LONG.value,
                                                     Direction.SHORT.value)
         else Direction.LONG,
+        asset_type=AssetType(row[14]) if row[14] in (
+            AssetType.STOCK.value, AssetType.FUTURE.value) else AssetType.STOCK,
+        point_value=row[15] or 0.0, margin=row[16] or 0.0,
+        expiry=row[17] or "",
     )
 
 
@@ -145,7 +160,8 @@ def save(deals, balance):
                 ", ".join(_DEAL_COLS), ", ".join("?" * len(_DEAL_COLS))),
             [(d.ticker, d.stock_price, d.amount, d.open_date, d.init_price,
               d.take_profit, d.stop_loss, d.trade_system, d.result,
-              d.close_date, d.whats_next, d.notes, d.currency, d.direction.value)
+              d.close_date, d.whats_next, d.notes, d.currency, d.direction.value,
+              d.asset_type.value, d.point_value, d.margin, d.expiry)
              for d in deals])
         conn.commit()
     finally:

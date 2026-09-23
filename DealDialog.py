@@ -1,14 +1,15 @@
 # This Python file uses the following encoding: utf-8
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QThread, Signal
 from qt_loader import loadUi
 
 from enum import Enum
 from datetime import datetime
 from dataclasses import dataclass
 
-from deals import Deal, Direction, TRADE_SYSTEMS, trade_system_name
+from deals import AssetType, Deal, Direction, TRADE_SYSTEMS, trade_system_name
+import futures
 import markets
 import logo
 import risk_plan
@@ -43,6 +44,10 @@ class FutureUtil(object):
 
       @staticmethod
       def is_future(deal):
+          if getattr(deal, 'asset_type', None) == AssetType.FUTURE:
+              return True
+          if futures.is_supported_future(getattr(deal, 'ticker', '')):
+              return True
           for i in FutureUtil.elements:
               if deal.ticker.startswith(str(i.ticker+'-')):
                   return True
@@ -59,12 +64,39 @@ class FutureUtil(object):
 
 
 
+class _FutureSpecThread(QThread):
+    """Фоновая загрузка спецификации фьючерса с ISS (сеть вне UI-потока)."""
+    resolved = Signal(str, object)   # (запрошенный тикер, FutureSpec | None)
+
+    def __init__(self, ticker, parent=None):
+        super().__init__(parent)
+        self._ticker = ticker
+
+    def run(self):
+        spec = None
+        try:
+            spec = futures.resolve(self._ticker)
+            if spec is not None:
+                markets.fetch_usd_rate()   # прогреть кэш курса для risk plan
+        except Exception:
+            spec = None
+        self.resolved.emit(self._ticker, spec)
+
+
 class RiskManager:
     balance = 0.0
     warning = ''
+    usd_rate = 1.0
+
     def checkRisk(self):
 
-        if FutureUtil.is_future(self.deal):
+        if getattr(self.deal, 'asset_type', None) == AssetType.FUTURE \
+                and self.deal.point_value:
+            # ₽ на контракт -> USD, баланс ведётся в USD.
+            riskPerStock = futures.risk_rub(
+                self.deal.stock_price, self.deal.stop_loss, 1,
+                self.deal.point_value) / (self.usd_rate or 1.0)
+        elif FutureUtil.is_future(self.deal):
             riskPerStock = FutureUtil.convert(self.deal.ticker, self.deal.stock_price-self.deal.stop_loss)
         else:
             riskPerStock = self.deal.stock_price-self.deal.stop_loss
@@ -106,11 +138,130 @@ class DealDialog(QDialog):
 
         self._equity_usd = 0.0
         self._updating_risk = False
+        self._future_spec = None
+        self._futureThread = None
+        self._futureThreads = []
+        self._build_future_info()
         self._update_risk_plan()
 
         self.resize(600, 800)
         self.buttonBox_2.setGeometry(10, 762, 341, 32)
         self._build_tech_context()
+
+    # ---------------------------------------------------------------- futures
+    def _build_future_info(self):
+        """Строка со спецификацией фьючерса (контракт, пункт, ГО, экспирация)."""
+        self.futureInfoLabel = QtWidgets.QLabel('', self)
+        self.futureInfoLabel.setGeometry(300, 112, 290, 64)
+        self.futureInfoLabel.setWordWrap(True)
+        self.futureInfoLabel.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.futureInfoLabel.setStyleSheet(
+            'color: {}; font-size: 10px;'.format(_MUTED))
+        self.futureInfoLabel.setVisible(False)
+
+    def isFuture(self):
+        return self._future_spec is not None
+
+    def _start_future_lookup(self, ticker):
+        """Запустить фоновую загрузку спецификации (UI не блокируется)."""
+        self.futureInfoLabel.setVisible(True)
+        self.futureInfoLabel.setText('Загружаю спецификацию {} с Мосбиржи…'
+                                     .format(_esc(ticker.upper())))
+        t = _FutureSpecThread(ticker, self)
+        t.resolved.connect(self._on_future_resolved)
+        self._futureThread = t
+        self._futureThreads.append(t)
+        t.finished.connect(lambda th=t: self._futureThreads.remove(th)
+                           if th in self._futureThreads else None)
+        t.start()
+
+    def _on_future_resolved(self, requested, spec):
+        # Игнорируем устаревший ответ, если тикер уже сменили.
+        current = (self.ticketEdit.text() or '').strip().upper()
+        if requested.strip().upper() != current and not (
+                spec is not None and current in (spec.secid.upper(),
+                                                 spec.shortname.upper())):
+            return
+        if spec is None:
+            self._future_spec = None
+            self.futureInfoLabel.setText(
+                '<span style="color:#ef5350;">Контракт {} не найден на FORTS '
+                '(или нет связи с ISS).</span>'.format(_esc(requested.upper())))
+            self._update_risk_plan()
+            return
+        self._future_spec = spec
+        self.ticketEdit.setText(spec.shortname)
+        self._currency = markets.RUB   # расчёты по FORTS — в рублях
+        for name in ('priceUnitLabel', 'slUnitLabel', 'tpUnitLabel'):
+            if hasattr(self, name):
+                getattr(self, name).setText('$')
+        if spec.price:
+            self.priceEdit.setText(str(spec.price))
+        self.label_4.setText('Contracts:')
+        self.riskPlanGroup.setTitle('Risk plan (futures, per contract)')
+        self.setLogo(spec.asset, markets.MOEX)
+        self._render_future_info()
+        self._refresh_future_rub_labels()
+        self._update_risk_plan()
+        self.loadTechnicalContext(spec.shortname)
+
+    def _render_future_info(self):
+        spec = self._future_spec
+        if spec is None:
+            return
+        name = futures.SUPPORTED_ASSETS.get(spec.asset, spec.asset)
+        days = spec.days_to_expiry()
+        lines = [
+            '<b style="color:{};">{} · {} ({})</b>'.format(
+                _TXT, _esc(name), _esc(spec.shortname), _esc(spec.secid)),
+            '1 контракт = {} bbl · 1$ цены = {:,.2f} ₽'.format(
+                spec.lot_volume, spec.point_value).replace(',', ' '),
+            'ГО: {:,.0f} ₽ / контракт'.format(
+                spec.initial_margin).replace(',', ' '),
+            'Экспирация: {}{}'.format(
+                _esc(spec.last_trade_date),
+                ' (через {} дн.)'.format(days) if days is not None else ''),
+        ]
+        blocker, warning = futures.expiry_issue(spec.last_trade_date)
+        if blocker or warning:
+            lines.append('<span style="color:#f0c14b;">⚠ {}</span>'.format(
+                _esc(blocker or warning)))
+        self.futureInfoLabel.setText('<br>'.join(lines))
+
+    def _clear_future(self):
+        if self._future_spec is None and not self.futureInfoLabel.isVisible():
+            return
+        self._future_spec = None
+        self.futureInfoLabel.setVisible(False)
+        self.futureInfoLabel.setText('')
+        self.label_4.setText('Amount:')
+        self.riskPlanGroup.setTitle('Risk plan')
+        for name in ('priceRubLabel', 'stopLossRubLabel', 'takeProfitRubLabel'):
+            getattr(self, name).setText('')
+
+    def _rub_per_contract(self, price_text):
+        spec = self._future_spec
+        try:
+            value = float(price_text) if price_text else 0.0
+        except ValueError:
+            return ''
+        if spec is None or value <= 0:
+            return ''
+        return '{:,.0f} ₽/контр.'.format(value * spec.point_value).replace(',', ' ')
+
+    def _refresh_future_rub_labels(self):
+        self.priceRubLabel.setText(self._rub_per_contract(self.priceEdit.text()))
+        self.stopLossRubLabel.setText(
+            self._rub_per_contract(self.stoplossEdit.text()))
+        self.takeProfitRubLabel.setText(
+            self._rub_per_contract(self.takeprofitEdit.text()))
+
+    def done(self, result):
+        # Потоки должны завершиться до уничтожения диалога.
+        for t in list(self._futureThreads):
+            if t.isRunning():
+                t.wait(5000)
+        super().done(result)
 
     def _build_tech_context(self):
         """Компактный блок «Technical context» (только чтение из БД).
@@ -232,15 +383,23 @@ class DealDialog(QDialog):
         except ValueError:
             entry = stop = amount = 0.0
         direction = getattr(self, '_direction', Direction.LONG)
+        spec = getattr(self, '_future_spec', None)
         plan = risk_plan.build_risk_plan(
             entry, stop, amount, direction,
             self._equity_usd, usd_rate=self._usd_rate(),
             max_notional_usd=risk_settings.max_notional_per_idea_usd(),
-            max_risk_pct=risk_settings.max_risk_per_trade_pct())
+            max_risk_pct=risk_settings.max_risk_per_trade_pct(),
+            multiplier=spec.point_value if spec else 1.0)
         m = plan['metrics']
         sign = markets.CURRENCY_SIGN.get(self._deal_currency(), 'pt')
-        self.riskPerShareLabel.setText(
-            'Risk per share: {}{:.2f}'.format(sign, m['risk_per_share']))
+        if spec is not None:
+            margin = futures.margin_rub(amount, spec.initial_margin)
+            self.riskPerShareLabel.setText(
+                'Risk per contract: {}{:,.0f} · Margin (ГО): {}{:,.0f}'.format(
+                    sign, m['risk_per_share'], sign, margin))
+        else:
+            self.riskPerShareLabel.setText(
+                'Risk per share: {}{:.2f}'.format(sign, m['risk_per_share']))
         self.positionValueLabel.setText(
             'Position value: {}{:,.0f}'.format(sign, m['position_value']))
         if plan['risk_pct'] is not None:
@@ -280,8 +439,13 @@ class DealDialog(QDialog):
             entry = float(self.priceEdit.text()) if self.priceEdit.text() else 0.0
             entry_usd = entry / self._usd_rate()
         except (ValueError, ZeroDivisionError):
-            entry_usd = 0.0
-        qty = risk_plan.quantity_from_notional(desired, entry_usd)
+            entry = entry_usd = 0.0
+        spec = getattr(self, '_future_spec', None)
+        if spec is not None:
+            qty = futures.contracts_from_notional(
+                desired, entry, spec.point_value, self._usd_rate())
+        else:
+            qty = risk_plan.quantity_from_notional(desired, entry_usd)
         if qty is None or qty <= 0:
             self._update_risk_plan()
             return
@@ -317,12 +481,29 @@ class DealDialog(QDialog):
         deal.currency = getattr(self, '_currency', '') or ''
         deal.trade_system = self.comboBox.currentIndex() if hasattr(self, 'comboBox') else 0
         deal.direction = self._direction
+        spec = getattr(self, '_future_spec', None)
+        if spec is not None:
+            deal.asset_type = AssetType.FUTURE
+            deal.currency = markets.RUB
+            deal.point_value = spec.point_value
+            deal.margin = spec.initial_margin
+            deal.expiry = spec.last_trade_date
         return deal
 
     def okPressed(self):
         print('Accept')
         deal = self.makeDeal()
         self._equity_usd = getattr(self, '_equity_usd', 0.0) or 0.0
+        if futures.is_supported_future(deal.ticker) and not deal.is_future:
+            self.infoLabel.setText(
+                'Спецификация фьючерса ещё не загружена — дождитесь данных '
+                'Мосбиржи или проверьте тикер.')
+            return
+        if deal.is_future:
+            blocker, _warn = futures.expiry_issue(deal.expiry)
+            if blocker:
+                self.infoLabel.setText(blocker)
+                return
         if not FutureUtil.is_future(deal):
             ok, reason = self._assessments_ok()
             if not ok:
@@ -338,12 +519,17 @@ class DealDialog(QDialog):
             deal.stock_price, deal.stop_loss, deal.amount,
             deal.direction, self._equity_usd, usd_rate=self._usd_rate(),
             max_notional_usd=risk_settings.max_notional_per_idea_usd(),
-            max_risk_pct=risk_settings.max_risk_per_trade_pct())
+            max_risk_pct=risk_settings.max_risk_per_trade_pct(),
+            multiplier=deal.point_value if deal.is_future else 1.0)
         if not plan['ok']:
             self.infoLabel.setText('; '.join(plan['blockers']))
             self._update_risk_plan()
             return
         warnings = list(plan['warnings'])
+        if deal.is_future:
+            _b, exp_warn = futures.expiry_issue(deal.expiry)
+            if exp_warn:
+                warnings.append(exp_warn)
         if warnings:
             self.infoLabel.setText('\n'.join(warnings))
             print('Risk plan warnings')
@@ -360,6 +546,7 @@ class DealDialog(QDialog):
         self.riskManager = RiskManager()
         self.riskManager.balance = self._balance
         self.riskManager.deal = self.makeDeal()
+        self.riskManager.usd_rate = self._usd_rate()
         if self.riskManager.checkRisk():
             self.accept()
         else:
@@ -442,6 +629,16 @@ class DealDialog(QDialog):
 
     def tickerChanged(self):
         print('TickerChanged')
+        ticker = (self.ticketEdit.text() or '').strip()
+        spec = self._future_spec
+        if spec is not None and ticker.upper() in (spec.secid.upper(),
+                                                   spec.shortname.upper()):
+            return 'Future'   # уже загружено (например, после setText)
+        if futures.is_supported_future(ticker):
+            self._future_spec = None
+            self._start_future_lookup(ticker)
+            return 'Future'
+        self._clear_future()
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
@@ -466,6 +663,9 @@ class DealDialog(QDialog):
         return 'Stock'
 
     def priceChanged(self):
+        if self._future_spec is not None:
+            self.priceRubLabel.setText(self._rub_per_contract(self.priceEdit.text()))
+            return 'Future'
         print('TickerChanged')
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
@@ -475,6 +675,9 @@ class DealDialog(QDialog):
         return 'Stock'
 
     def stopLossChanged(self):
+        if self._future_spec is not None:
+            self.stopLossRubLabel.setText(self._rub_per_contract(self.stoplossEdit.text()))
+            return 'Future'
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
@@ -483,6 +686,9 @@ class DealDialog(QDialog):
         return 'Stock'
 
     def takeProfitChanged(self):
+        if self._future_spec is not None:
+            self.takeProfitRubLabel.setText(self._rub_per_contract(self.takeprofitEdit.text()))
+            return 'Future'
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
