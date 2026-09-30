@@ -28,6 +28,23 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
 Quality Assessment в проде сохраняется через ручную кнопку «Quality result»
 (rich-text/HTML), а авто-захват — best-effort и не тестируется в offscreen.
 
+## ВАЖНО: НИКОГДА не перезаписывать пользовательскую базу
+
+**Абсолютный запрет.** Пользовательские данные (`diary.db`, `catalyst.db`,
+`watchlist.json`, `idea_log.db`, `earnings_cache.db` и прочие файлы в корне репо) —
+это живая база пользователя, а не тестовый фикстур. Её потеря недопустима.
+
+- **Никогда не конструируй `TradeDiary()` в тестах/скриптах на реальном репо**:
+  `TradeDiary.__init__` читает `diary.db`, а `closeEvent` вызывает `save_diary(...)`,
+  полностью перезаписывая базу. Именно так была потеряна база (инцидент 30.09.2026).
+- Любой тест, трогающий БД, обязан работать на **временной копии** (tmp-файл /
+  `tempfile.TemporaryDirectory`) или с monkeypatch `persistence.DB_PATH` / `XML_PATH`.
+  Никогда не пиши в боевые `*.db` из тестов.
+- Не запускай скрипты, вызывающие `save()`/`closeEvent`, против рабочей копии.
+- Если сомневаешься — сначала сделай резервную копию `cp diary.db /tmp/opencode/`.
+- Перед любыми действиями проверь, не запущено ли приложение (`ps aux | grep main.py`):
+  работающий процесс держит старую версию данных в памяти и при закрытии перезапишет файл.
+
 ## ВАЖНО: данные всегда в фоновом потоке
 
 Это ключевое правило проекта (введено последними коммитами). **Никогда не делай
@@ -256,7 +273,15 @@ Analysis и остальные экраны не развиваем, не пер
     `load_timing`/`load_any_timing`/`save_timing`/`is_fresh`. `compute_fresh(ticker)` —
     фоновый пересчёт (сеть через `price_history`, вызывать ТОЛЬКО из потока).
   - `technical_timing_dialog.py`: блок «Technical timing — Daily» (Trend/Momentum/
-    Status/Reason/Warning) + сигналы `open_trade_plan`/`view_chart`.
+    Status/Reason/Warning) + сигналы `open_trade_plan`/`view_chart`. Внизу — ручное
+    напоминание «Проверить: дата» ([Напомнить]/[Снять]) через `tech_reminders`.
+  - `tech_reminders.py`: **чистый модуль** (без Qt) — ручные напоминания «проверить
+    тех. статус». SQLite `tech_reminders.db` (id, ticker, due_date, note, notified),
+    одно напоминание на тикер (заменяет прежнее): `add`/`for_ticker`/`next_for`/
+    `remove`/`remove_for_ticker`/`due_events`/`mark_notified`/`reminder_text`.
+    Подхватывается `_CatalystReminderThread` (main.py) вместе с катализаторами:
+    коза напоминает с подтверждением (красный крестик). Тесты:
+    `tests/test_tech_reminders.py` (9, временная БД).
   - `watchlist_dialog.py`: колонка **Tech** (цветной статус), кнопка **Technical**,
     двойной клик по колонке; `_TechnicalTimingThread` (фоновый пересчёт, `cancel()`),
     `_open_trade_plan` (DealDialog с контекстом, Long по умолчанию), `_view_chart`.

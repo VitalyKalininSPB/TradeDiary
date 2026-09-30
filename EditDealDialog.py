@@ -52,6 +52,11 @@ class EditDealDialog(QDialog):
     def okPressed(self):
         print('Accept')
         self.deal.stock_price = float(self.priceEdit.text()) if self.priceEdit.text() else self.deal.stock_price
+        if self.initpriceEdit.text():
+            try:
+                self.deal.init_price = float(self.initpriceEdit.text())
+            except ValueError:
+                pass
         self.deal.trade_system = self.tradesystemList.currentIndex()
         self.deal.close_date = self.closeDateLabel.text()
         self.deal.whats_next = self.whatsNextEdit.toPlainText()

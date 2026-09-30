@@ -63,12 +63,14 @@ class TableModel(QtCore.QAbstractTableModel):
                 return ''
             return getattr(deal, self._COL_ATTRS[col])
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
-            if deal.init_price > deal.stock_price:
-                return QtGui.QBrush(QtGui.QColor(42, 106, 64))
-            elif deal.init_price < deal.stock_price:
-                return QtGui.QBrush(QtGui.QColor(140, 46, 46))
-            else:
+            if deal.init_price == deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(28, 29, 34))
+            if deal.direction == Direction.SHORT:
+                gain = deal.stock_price < deal.init_price
+            else:
+                gain = deal.stock_price > deal.init_price
+            return QtGui.QBrush(QtGui.QColor(42, 106, 64) if gain
+                                else QtGui.QColor(140, 46, 46))
         if role == QtCore.Qt.ItemDataRole.ForegroundRole:
             if deal.init_price != deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(255, 255, 255))
@@ -241,16 +243,17 @@ class _QuantAlertThread(QtCore.QThread):
 
 
 class _CatalystReminderThread(QtCore.QThread):
-    """Background check of catalyst reminders (local SQLite, no network):
-    события «за сутки до даты» (и просроченные)."""
+    """Фоновый опрос напоминаний (локальный SQLite, без сети):
+    катализаторы «за сутки до даты» (и просроченные) + ручные напоминания
+    «проверить тех. статус» из окна Technical timing."""
 
     reminders = QtCore.Signal(list)
 
     def run(self):
         msgs = []
-        ids = []
         try:
             import catalyst
+            ids = []
             for e in catalyst.due_events():
                 msgs.append(catalyst.reminder_text(e))
                 ids.append(e['id'])
@@ -258,7 +261,56 @@ class _CatalystReminderThread(QtCore.QThread):
                 catalyst.mark_notified(ids)
         except Exception as e:  # noqa: BLE001 - never break startup
             print('Catalyst reminder: {}'.format(e))
+        try:
+            import tech_reminders
+            tids = []
+            for r in tech_reminders.due_events():
+                msgs.append(tech_reminders.reminder_text(r))
+                tids.append(r['id'])
+            if tids:
+                tech_reminders.mark_notified(tids)
+        except Exception as e:  # noqa: BLE001
+            print('Tech reminder: {}'.format(e))
         self.reminders.emit(msgs)
+
+
+class _PriceRefreshThread(QtCore.QThread):
+    """Фоновое обновление текущей цены (stock_price) открытых сделок.
+
+    Цена входа (init_price) НЕ трогается — она фиксируется при открытии сделки.
+    Сеть выполняется в фоне, наружу отдаётся только результат.
+    """
+
+    prices_ready = QtCore.Signal(dict)  # {id(deal): current_price}
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self._items = items  # [(id(deal), ticker, currency), ...]
+
+    @staticmethod
+    def _fetch(ticker, currency):
+        if currency == markets.RUB:
+            return markets.fetch_moex_price(ticker)
+        if currency == markets.USD:
+            return markets.fetch_world_price(ticker)
+        market, detected = markets.market_currency(ticker)
+        if detected == markets.RUB:
+            return markets.fetch_moex_price(ticker)
+        if detected == markets.USD:
+            return markets.fetch_world_price(ticker)
+        return None
+
+    def run(self):
+        result = {}
+        for key, ticker, currency in self._items:
+            try:
+                price = self._fetch(ticker, currency)
+            except Exception as e:  # noqa: BLE001 - the UI must never crash
+                log.warning('Price refresh failed for %s: %s', ticker, e)
+                price = None
+            if price:
+                result[key] = float(price)
+        self.prices_ready.emit(result)
 
 
 class TradeDiary(QtWidgets.QMainWindow):
@@ -287,6 +339,12 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._fomc_new = 0
         self.setupMacro()
         self.setupCorrelation()
+        self._priceThread = None
+        self._priceTimer = QtCore.QTimer(self)
+        self._priceTimer.setInterval(30 * 60 * 1000)
+        self._priceTimer.timeout.connect(self._refreshPrices)
+        self._priceTimer.start()
+        QtCore.QTimer.singleShot(1500, self._refreshPrices)
         self.quantitiveAssessmentButton.clicked.connect(self.quantitiveAssessmentClicked)
         self.qualitativeAssessmentButton.clicked.connect(self.qualitativeAssessmentClicked)
         self.correlationMatrixButton.clicked.connect(self.correlationMatrixClicked)
@@ -868,6 +926,53 @@ class TradeDiary(QtWidgets.QMainWindow):
     def read_data(self):
         self.data, self.base_balance = load_diary()
         self.holdings_usd = 0.0
+        self._backfill_init_prices()
+
+    def _backfill_init_prices(self):
+        """Старые сделки без init_price: зафиксировать цену входа = stock_price.
+
+        Существующие init_price не перезаписываются — цена входа не теряется.
+        """
+        for deal in self.data:
+            if not deal.init_price and deal.stock_price:
+                deal.init_price = deal.stock_price
+
+    def _refreshPrices(self):
+        """Обновить текущую цену открытых сделок в фоне (init_price не трогаем)."""
+        t = getattr(self, '_priceThread', None)
+        if t is not None and t.isRunning():
+            return
+        self._backfill_init_prices()
+        items = []
+        for deal in self.data:
+            if not deal.is_open:
+                continue
+            ticker = (deal.ticker or '').strip()
+            if not ticker or FutureUtil.is_future(self._fakeDeal(ticker)):
+                continue
+            items.append((id(deal), ticker, deal.currency))
+        if not items:
+            return
+        thread = _PriceRefreshThread(items, self)
+        thread.prices_ready.connect(self._onPricesRefreshed)
+        self._priceThread = thread
+        thread.start()
+
+    def _onPricesRefreshed(self, prices):
+        if not prices:
+            return
+        changed = False
+        for deal in self.data:
+            if not deal.is_open:
+                continue
+            price = prices.get(id(deal))
+            if price and price > 0 and price != deal.stock_price:
+                deal.stock_price = price
+                changed = True
+        if not changed:
+            return
+        self.tradeTableView.model().layoutChanged.emit()
+        self.recalcBalance()
 
     def recalcBalance(self):
         self.holdings_usd = 0.0
@@ -913,6 +1018,9 @@ class TradeDiary(QtWidgets.QMainWindow):
         t = getattr(self, '_macroThread', None)
         if t is not None and t.isRunning():
             t.wait(5000)
+        pt = getattr(self, '_priceThread', None)
+        if pt is not None and pt.isRunning():
+            pt.wait(5000)
         for ct in list(getattr(self, '_catalystCheckThreads', [])):
             if ct.isRunning():
                 ct.wait(5000)
@@ -1243,11 +1351,8 @@ class TradeDiary(QtWidgets.QMainWindow):
         return '{:.2f}'.format(value)
 
     def updatePricesClicked(self):
-        log.warning("Update prices: устаревший обработчик (URL 2023 г.) — отключён")
-        QtWidgets.QMessageBox.information(
-            self.window(), 'Update prices',
-            'Автообновление котировок временно отключено (устаревшая загрузка). '
-            'Цены подтягиваются автоматически при добавлении тикера.')
+        log.info("Update prices: фоновое обновление текущих цен")
+        self._refreshPrices()
 
 
 DARK_QSS = """

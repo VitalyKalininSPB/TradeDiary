@@ -108,9 +108,43 @@ class DealDialog(QDialog):
         self._updating_risk = False
         self._update_risk_plan()
 
-        self.resize(600, 800)
-        self.buttonBox_2.setGeometry(10, 762, 341, 32)
+        self._wrap_in_scroll()
         self._build_tech_context()
+        self._fit_to_screen()
+
+    def _wrap_in_scroll(self):
+        """Обернуть контент в прокручиваемую область, кнопки OK/Cancel закрепить.
+
+        deal.ui использует абсолютную геометрию и фиксированную высоту 800px —
+        на экранах ниже кнопки уходили за край без возможности прокрутки.
+        """
+        self._content = QtWidgets.QWidget()
+        self._content.setMinimumSize(600, 760)
+        self._content.setGeometry(0, 0, 600, 760)
+        original = [c for c in self.children()
+                    if isinstance(c, QtWidgets.QWidget)]
+        for child in original:
+            if child is not self.buttonBox_2:
+                child.setParent(self._content)
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._scroll.setWidget(self._content)
+        self.buttonBox_2.setParent(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(6, 4, 6, 6)
+        outer.setSpacing(4)
+        outer.addWidget(self._scroll, 1)
+        outer.addWidget(self.buttonBox_2, 0)
+
+    def _fit_to_screen(self):
+        """Не дать диалогу вырасти выше доступной области экрана."""
+        screen = QtWidgets.QApplication.primaryScreen()
+        height = 800
+        if screen is not None:
+            avail = screen.availableGeometry()
+            height = max(420, min(800, avail.height() - 40))
+        self.resize(620, height)
 
     def _build_tech_context(self):
         """Компактный блок «Technical context» (только чтение из БД).
@@ -118,7 +152,7 @@ class DealDialog(QDialog):
         Позиционируется в свободной области между Risk plan и кнопками;
         deal.ui не трогаем, чтобы не перестраивать абсолютную геометрию.
         """
-        self.techGroup = QtWidgets.QGroupBox('Technical context', self)
+        self.techGroup = QtWidgets.QGroupBox('Technical context', self._content)
         self.techGroup.setGeometry(20, 655, 560, 100)
         lay = QtWidgets.QVBoxLayout(self.techGroup)
         lay.setContentsMargins(10, 6, 10, 6)
@@ -321,18 +355,29 @@ class DealDialog(QDialog):
 
     def okPressed(self):
         print('Accept')
+        try:
+            self._try_open_deal()
+        except Exception as exc:  # noqa: BLE001 - показать причину, а не молчать
+            import traceback
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(
+                self, 'Cannot save deal',
+                'Сделку не удалось сохранить: {}'.format(exc))
+
+    def _try_open_deal(self):
         deal = self.makeDeal()
         self._equity_usd = getattr(self, '_equity_usd', 0.0) or 0.0
         if not FutureUtil.is_future(deal):
-            ok, reason = self._assessments_ok()
+            ok, missing = self._assessments_ok()
             if not ok:
+                names = ' и '.join(missing)
+                advice = self._missing_assessment_advice(deal.ticker, missing)
                 self.infoLabel.setText(
-                    reason + '. Сделка запрещена: сначала заверши Quant и '
-                    'Qual Assessment для этого тикера.')
-                self._show_goat(
-                    'Запрет: {} для {}. Сначала заверши Quant и Qual '
-                    'Assessment — только потом открывай сделку.'.format(
-                        reason, deal.ticker))
+                    'Не пройден {} Assessment для {}. Сделка запрещена: '
+                    'сначала заверши {}.'.format(names, deal.ticker, names))
+                self._show_goat(advice)
+                QtWidgets.QMessageBox.warning(
+                    self, 'Assessment required', advice)
                 return
         plan = risk_plan.build_risk_plan(
             deal.stock_price, deal.stop_loss, deal.amount,
@@ -340,8 +385,11 @@ class DealDialog(QDialog):
             max_notional_usd=risk_settings.max_notional_per_idea_usd(),
             max_risk_pct=risk_settings.max_risk_per_trade_pct())
         if not plan['ok']:
-            self.infoLabel.setText('; '.join(plan['blockers']))
+            blockers = '; '.join(plan['blockers'])
+            self.infoLabel.setText(blockers)
             self._update_risk_plan()
+            QtWidgets.QMessageBox.warning(
+                self, 'Cannot open deal', blockers)
             return
         warnings = list(plan['warnings'])
         if warnings:
@@ -376,22 +424,38 @@ class DealDialog(QDialog):
                 self.accept()
 
     def _assessments_ok(self):
-        """Для сделки нужны оба Assessment: Quant и Qual (в watchlist)."""
+        """Какие Assessment не пройдены (в watchlist). Возвращает (ok, missing).
+
+        `missing` — список имён: 'Quant' и/или 'Qual'. Так сообщение козы
+        называет КОНКРЕТНЫЙ незавершённый анализ, а не оба сразу.
+        """
         from watchlist import find as watchlist_find
         from watchlist import get_quant, get_qual
         ticker = (self.ticketEdit.text() or '').strip().upper()
         if not ticker:
-            return True, ''
+            return True, []
         entry = watchlist_find(ticker) or {}
         missing = []
         if get_quant(entry) is None:
             missing.append('Quant')
         if get_qual(entry) is None:
             missing.append('Qual')
-        if missing:
-            names = ' и '.join(missing)
-            return False, 'Не пройден Assessment: {}'.format(names)
-        return True, ''
+        return (not missing), missing
+
+    @staticmethod
+    def _missing_assessment_advice(ticker, missing):
+        """Точная подсказка козы: какой именно Assessment и как его пройти."""
+        how = {
+            'Quant': 'Quant. Assessment → Ticker {} → [Анализ] → '
+                     '[Add to Watchlist]'.format(ticker),
+            'Qual': 'Qual. Assessment → Ticker {} → [Begin assessment] → '
+                    'пройди 7 этапов → [Finish]'.format(ticker),
+        }
+        names = ' и '.join(missing)
+        steps = '; затем '.join(how[m] for m in missing)
+        return ('{}: не пройден {} Assessment. Открой: {}. '
+                'После этого снова [Open trade plan].').format(
+                    ticker, names, steps)
 
     def _show_goat(self, advice):
         from qualitative_dialog import GoatAssistant

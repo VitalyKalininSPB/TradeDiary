@@ -10,7 +10,7 @@ Reason и мягкое предупреждение (растянутость). 
 готовый результат монитора.
 """
 from PySide6 import QtWidgets
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QDate, Signal
 
 _TXT = '#dcdce0'
 _MUTED = '#9aa0aa'
@@ -69,6 +69,8 @@ class TechnicalTimingDialog(QtWidgets.QDialog):
             _MUTED))
         root.addWidget(self._metaLbl)
 
+        self._build_reminder_row(root)
+
         row = QtWidgets.QHBoxLayout()
         tradeBtn = QtWidgets.QPushButton('Open trade plan')
         chartBtn = QtWidgets.QPushButton('View chart')
@@ -85,6 +87,83 @@ class TechnicalTimingDialog(QtWidgets.QDialog):
         keepBtn.clicked.connect(self.close)
 
         self._render(result)
+
+    def _build_reminder_row(self, root):
+        """Ручное напоминание «проверить тех. статус» (коза напомнит в дату)."""
+        row = QtWidgets.QHBoxLayout()
+        label = QtWidgets.QLabel('Проверить:')
+        label.setStyleSheet('color: {}; font-size: 11px;'.format(_TXT))
+        self._remindDate = QtWidgets.QDateEdit(
+            QDate.currentDate().addDays(7))
+        self._remindDate.setCalendarPopup(True)
+        self._remindDate.setDisplayFormat('dd.MM.yyyy')
+        self._remindNote = QtWidgets.QLineEdit()
+        self._remindNote.setPlaceholderText('комментарий (необязательно)')
+        self._remindBtn = QtWidgets.QPushButton('Напомнить')
+        self._clearRemindBtn = QtWidgets.QPushButton('Снять')
+        row.addWidget(label)
+        row.addWidget(self._remindDate)
+        row.addWidget(self._remindNote, 1)
+        row.addWidget(self._remindBtn)
+        row.addWidget(self._clearRemindBtn)
+        root.addLayout(row)
+
+        self._remindLbl = QtWidgets.QLabel('')
+        self._remindLbl.setWordWrap(True)
+        self._remindLbl.setStyleSheet('color: {}; font-size: 11px;'.format(
+            _MUTED))
+        root.addWidget(self._remindLbl)
+
+        self._remindBtn.clicked.connect(self._add_reminder)
+        self._clearRemindBtn.clicked.connect(self._remove_reminder)
+        self._refresh_reminder()
+
+    def _add_reminder(self):
+        import tech_reminders
+        due = self._remindDate.date().toString('yyyy-MM-dd')
+        tech_reminders.add(
+            self._ticker, due, self._remindNote.text().strip())
+        self._refresh_reminder()
+        self._remindLbl.setStyleSheet(
+            'color: {}; font-size: 11px;'.format(_YELLOW))
+
+    def _remove_reminder(self):
+        import tech_reminders
+        tech_reminders.remove_for_ticker(self._ticker)
+        self._refresh_reminder()
+
+    def _refresh_reminder(self):
+        import tech_reminders
+        items = tech_reminders.for_ticker(self._ticker)
+        # Взаимоисключающие действия: либо поставить напоминание, либо снять.
+        self._remindBtn.setVisible(not items)
+        self._clearRemindBtn.setVisible(bool(items))
+        self._remindDate.setEnabled(not items)
+        self._remindNote.setEnabled(not items)
+        if not items:
+            self._remindLbl.setText(
+                'Напоминание не задано. Поставьте дату — коза напомнит '
+                'проверить статус (как для катализаторов).')
+            return
+        first = items[0]
+        d = QDate.fromString(first.get('due_date') or '', 'yyyy-MM-dd')
+        if d.isValid():
+            self._remindDate.setDate(d)
+        self._remindNote.setText(first.get('note') or '')
+        parts = []
+        for r in items:
+            try:
+                d = QDate.fromString(r['due_date'], 'yyyy-MM-dd')
+                when = d.toString('dd.MM.yyyy') if d.isValid() else r['due_date']
+            except Exception:  # noqa: BLE001
+                when = r['due_date']
+            txt = 'Проверить {}: {}'.format(r['ticker'], when)
+            if r.get('note'):
+                txt += ' — {}'.format(r['note'])
+            parts.append(txt)
+        self._remindLbl.setText('Напоминание: ' + '; '.join(parts))
+        self._remindLbl.setStyleSheet(
+            'color: {}; font-size: 11px;'.format(_TXT))
 
     def _render(self, result):
         status = (result or {}).get('status') or 'no_data'
