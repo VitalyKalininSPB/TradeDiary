@@ -265,7 +265,12 @@ Analysis и остальные экраны не развиваем, не пер
   сигнал `confirmed`): пользователь явно подтверждает прочтение, только потом
   показывается следующее; пока есть активное/очередное подтверждение, обычные
   уведомления Козы подавляются (`_show_advice_goat`).
-- `deal_history.py`: история сделок. `DealDialog.py`/`EditDealDialog.py`: формы сделки,
+- `deal_history.py`: история сделок. `DealDialog.py`: форма открытия сделки;
+  `EditDealDialog.py`: окно **позиции** (`setPosition`) — средневзвешенный
+  init price, текущая цена только для чтения, общие поля применяются ко всем
+  сделкам тикера; блок «Закрыть часть позиции» (продать/выкупить часть по
+  текущей цене — применяется СРАЗУ через колбэк `on_partial` →
+  `main._partial_close`, FIFO по дате).
   `Deal`, `DirectionType`, `TRADE_SYSTEMS`.
 - `simple_mode.py`: **чистый модуль** (без Qt) Simple Mode карточки тикера:
   `build_simple_card(e, catalyst)` → вердикт (Candidate/Watchlist/Skip/Нет данных),

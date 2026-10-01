@@ -66,5 +66,102 @@ class PositionAggregationTest(unittest.TestCase):
         self.assertEqual(self._positions([d]), [])
 
 
+class PartialCloseTest(unittest.TestCase):
+    """Закрытие части позиции по текущей цене (без TP/SL)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._app = (QtWidgets.QApplication.instance()
+                    or QtWidgets.QApplication([]))
+
+    def _stub(self, data, balance):
+        s = _Stub()
+        s.data = data
+        s.base_balance = balance
+        s._settle = main.TradeDiary._settle.__get__(s)
+        s._syncModel = lambda: None
+        s.recalcBalance = lambda: None
+        return s
+
+    def test_long_partial_sell_fifo(self):
+        d1 = Deal(ticker='X', amount=6, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='30/09/2026')
+        d2 = Deal(ticker='X', amount=13, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='01/10/2026')
+        s = self._stub([d1, d2], 10000.0)
+        pos = main.Position('X', [d1, d2])
+        left = main.TradeDiary._partial_close(s, pos, 4)
+        self.assertEqual(d1.amount, 2)
+        self.assertEqual(d2.amount, 13)
+        self.assertAlmostEqual(s.base_balance, 10000.0 + 4 * 110)
+        self.assertEqual(left, 15)
+
+    def test_long_partial_exhausts_first_deal(self):
+        d1 = Deal(ticker='X', amount=6, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='30/09/2026')
+        d2 = Deal(ticker='X', amount=13, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='01/10/2026')
+        s = self._stub([d1, d2], 10000.0)
+        pos = main.Position('X', [d1, d2])
+        left = main.TradeDiary._partial_close(s, pos, 8)
+        self.assertNotIn(d1, s.data)
+        self.assertEqual(d2.amount, 11)
+        self.assertEqual(left, 11)
+
+    def test_short_partial_buyback_debits(self):
+        d = Deal(ticker='X', amount=54, init_price=18.26, stock_price=18.46,
+                 currency='USD', direction=Direction.SHORT,
+                 open_date='30/09/2026')
+        s = self._stub([d], 10000.0)
+        pos = main.Position('X', [d])
+        left = main.TradeDiary._partial_close(s, pos, 20)
+        self.assertEqual(d.amount, 34)
+        self.assertAlmostEqual(s.base_balance, 10000.0 - 20 * 18.46)
+        self.assertEqual(left, 34)
+
+    def test_zero_qty_is_noop(self):
+        d = Deal(ticker='X', amount=6, init_price=100, stock_price=110,
+                 currency='USD', direction=Direction.LONG,
+                 open_date='30/09/2026')
+        s = self._stub([d], 10000.0)
+        pos = main.Position('X', [d])
+        left = main.TradeDiary._partial_close(s, pos, 0)
+        self.assertEqual(d.amount, 6)
+        self.assertEqual(s.base_balance, 10000.0)
+        self.assertEqual(left, 6)
+
+
+class EditDialogPartialTest(unittest.TestCase):
+    """[Sell] в окне позиции применяется сразу (не по [OK])."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._app = (QtWidgets.QApplication.instance()
+                    or QtWidgets.QApplication([]))
+
+    def test_sell_applies_immediately(self):
+        from EditDealDialog import EditDealDialog
+        d1 = Deal(ticker='X', amount=6, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='30/09/2026')
+        d2 = Deal(ticker='X', amount=1, init_price=100, stock_price=110,
+                  currency='USD', direction=Direction.LONG,
+                  open_date='01/10/2026')
+        pos = main.Position('X', [d1, d2])
+        calls = []
+        dlg = EditDealDialog()
+        dlg.setPosition(pos, 10000.0,
+                        on_partial=lambda q: (calls.append(q) or 6.0))
+        dlg.partialQty.setText('1')
+        dlg._partial_clicked()
+        self.assertEqual(calls, [1.0])
+        self.assertEqual(dlg._remaining, 6.0)
+        self.assertEqual(dlg.amountEdit.text(), '6.00')
+
+
 if __name__ == '__main__':
     unittest.main()

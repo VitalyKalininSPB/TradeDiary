@@ -276,14 +276,14 @@ class DealDialog(QDialog):
         self.riskPerShareLabel.setText(
             'Risk per share: {}{:.2f}'.format(sign, m['risk_per_share']))
         self.positionValueLabel.setText(
-            'Position value: {}{:,.0f}'.format(sign, m['position_value']))
+            'Position value: {}{:,.2f}'.format(sign, m['position_value']))
         if plan['risk_pct'] is not None:
             self.riskAtStopLabel.setText(
-                'Risk at stop: {}{:,.0f} ({:.2f}% of equity)'.format(
+                'Risk at stop: {}{:,.2f} ({:.2f}% of equity)'.format(
                     sign, m['risk_at_stop'], plan['risk_pct']))
         else:
             self.riskAtStopLabel.setText(
-                'Risk at stop: {}{:,.0f}'.format(sign, m['risk_at_stop']))
+                'Risk at stop: {}{:,.2f}'.format(sign, m['risk_at_stop']))
         self.stopLossErrorLabel.setText('')
         for b in plan['blockers']:
             if b.startswith('Stop-loss'):
@@ -321,7 +321,7 @@ class DealDialog(QDialog):
             return
         self._updating_risk = True
         try:
-            self.amountEdit.setText(str(qty))
+            self.amountEdit.setText('{:.2f}'.format(qty))
         finally:
             self._updating_risk = False
         self._update_risk_plan()
@@ -509,7 +509,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stock_price)))
+            self.priceRubLabel.setText('{:.2f}'.format(FutureUtil.convert(deal.ticker, deal.stock_price)))
             return 'Future'
         ticker = self.ticketEdit.text().strip()
         if not ticker:
@@ -524,7 +524,7 @@ class DealDialog(QDialog):
             else:
                 price = markets.fetch_world_price(ticker)
             if price is not None:
-                self.priceEdit.setText(str(price))
+                self.priceEdit.setText('{:.2f}'.format(price))
         self.setLogo(ticker, market)
         self.loadTechnicalContext(ticker)
         return 'Stock'
@@ -534,7 +534,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.priceRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stock_price)) + ' RUB')
+            self.priceRubLabel.setText('{:.2f} RUB'.format(FutureUtil.convert(deal.ticker, deal.stock_price)))
             return 'Future'
         return 'Stock'
 
@@ -542,7 +542,7 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.stopLossRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.stop_loss)) + ' RUB')
+            self.stopLossRubLabel.setText('{:.2f} RUB'.format(FutureUtil.convert(deal.ticker, deal.stop_loss)))
             return 'Future'
         return 'Stock'
 
@@ -550,6 +550,6 @@ class DealDialog(QDialog):
         deal = self.makeDeal()
         if FutureUtil.is_future(deal):
             self.setCurrency('')
-            self.takeProfitRubLabel.setText(str(FutureUtil.convert(deal.ticker, deal.take_profit)) + ' RUB')
+            self.takeProfitRubLabel.setText('{:.2f} RUB'.format(FutureUtil.convert(deal.ticker, deal.take_profit)))
             return 'Future'
         return 'Stock'

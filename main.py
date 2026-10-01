@@ -127,7 +127,13 @@ class TableModel(QtCore.QAbstractTableModel):
                 return ''
             if col == 8:
                 return self._result_text(deal)
-            return getattr(deal, self._COL_ATTRS[col])
+            val = getattr(deal, self._COL_ATTRS[col])
+            if col in (1, 2, 4, 5, 6):  # Price, Amount, InitPrice, TP, SL
+                try:
+                    return '{:.2f}'.format(float(val))
+                except (TypeError, ValueError):
+                    return val
+            return val
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if deal.init_price == deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(28, 29, 34))
@@ -1171,26 +1177,61 @@ class TradeDiary(QtWidgets.QMainWindow):
         if cost_usd is not None:
             self.base_balance -= cost_usd
 
-    def _creditClose(self, deal):
-        """Зачислить/списать средства при закрытии сделки.
-
-        LONG — выручка от продажи возвращается на cash (равно стоимости
-        позиции + P&L). SHORT — стоимость выкупа списывается с cash.
-        История закрытых сделок будет вестись отдельно (вкладка History).
-        """
-        proceeds_usd = None
+    def _settle(self, deal, qty, price):
+        """Зачислить (LONG) / списать (SHORT) стоимость qty акций по цене price."""
+        value_usd = None
         if deal.currency == markets.RUB:
             rate = markets.fetch_usd_rate()
             if rate:
-                proceeds_usd = deal.stock_price * deal.amount / rate
+                value_usd = price * qty / rate
         elif deal.currency == markets.USD:
-            proceeds_usd = deal.stock_price * deal.amount
-        if proceeds_usd is None:
+            value_usd = price * qty
+        if value_usd is None:
             return
         if deal.direction == Direction.SHORT:
-            self.base_balance -= proceeds_usd
+            self.base_balance -= value_usd
         else:
-            self.base_balance += proceeds_usd
+            self.base_balance += value_usd
+
+    def _creditClose(self, deal):
+        """Зачислить/списать средства при закрытии сделки (вся позиция сделки).
+
+        LONG — выручка от продажи возвращается на cash. SHORT — стоимость
+        выкупа списывается с cash.
+        """
+        self._settle(deal, deal.amount, deal.stock_price)
+
+    def _partial_close(self, position, qty):
+        """Закрыть ЧАСТЬ позиции по текущей цене (FIFO по дате открытия).
+
+        Для лонга — продать qty акций, для шорта — выкупить. Возвращает
+        оставшееся количество. Без TP/SL — чисто рыночная операция.
+        """
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            return position.amount
+        if qty <= 0:
+            return position.amount
+        price = position.stock_price
+        remaining = qty
+        live = [d for d in position.deals if d in self.data]
+        live.sort(key=lambda d: _parse_dt(d.open_date) or datetime.datetime.min)
+        for d in live:
+            if remaining <= 0:
+                break
+            if d.amount <= 0:
+                continue
+            take = min(d.amount, remaining)
+            self._settle(d, take, price)
+            d.amount -= take
+            remaining -= take
+        for d in list(position.deals):
+            if d.amount <= 0 and d in self.data:
+                self.data.remove(d)
+        self._syncModel()
+        self.recalcBalance()
+        return sum(d.amount for d in position.deals if d in self.data)
 
     def shortClicked(self):
         log.info("Short clicked")
@@ -1274,24 +1315,13 @@ class TradeDiary(QtWidgets.QMainWindow):
             return
         log.info("Edit clicked %s", row)
         pos = positions[row]
-        deal = pos.deals[0]
-        if len(pos.deals) > 1:
-            labels = ['{}. {:.6g} шт @ {:.4g} ({})'.format(
-                i + 1, d.amount, d.init_price, d.open_date)
-                for i, d in enumerate(pos.deals)]
-            choice, ok = QtWidgets.QInputDialog.getItem(
-                self, 'Правка {}'.format(pos.ticker),
-                'Позиция из {} сделок — выберите сделку:'.format(
-                    len(pos.deals)),
-                labels, 0, False)
-            if not ok:
-                return
-            deal = pos.deals[labels.index(choice)]
         dlg = EditDealDialog()
-        dlg.setData(deal, self.balanceUsd())
+        dlg.setPosition(pos, self.balanceUsd(),
+                        on_partial=lambda q: self._partial_close(pos, q))
         if dlg.exec():
             log.info("Success!")
-            if deal.close_date:
+            closed = [d for d in pos.deals if d.close_date]
+            for deal in closed:
                 idea_log.close_idea_from_deal(deal)
                 self._creditClose(deal)
                 if deal in self.data:
