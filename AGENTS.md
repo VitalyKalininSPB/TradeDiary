@@ -220,9 +220,12 @@ Analysis и остальные экраны не развиваем, не пер
 
 ## Карта модулей
 
-- `main.py` (1080+ строк): `TradeDiary(QMainWindow)` — главное окно; `TableModel`
-  (таблица сделок, 15 колонок, 12/13/14 = кнопки Chart(candles)/MA/Delete); чтение/запись
-  `diary.xml`; термометры макро и корреляции; риск-модель `RISK_BY_CORR`; обработчики кнопок.
+- `main.py` (1080+ строк): `TradeDiary(QMainWindow)` — главное окно; `Position` +
+  `TableModel` — таблица показывает **одну строку на тикер** (открытые сделки
+  агрегируются: сумма Amount, средневзвешенные init/текущая цена, общий P&L в
+  `Result`); 14 колонок, 12/13 = кнопки Chart(candles)/MA (кнопки Delete нет);
+  чтение/запись `diary.db`; термометры макро и корреляции; риск-модель
+  `RISK_BY_CORR`; обработчики кнопок.
 - `macro_dialog.py`: `compute_macro_score` (весовой `_SCORERS`, `math.tanh`, `_MOMENTUM_DAYS=90`,
   `_YOY_DAYS=365`), `compute_macro_score_cached`, `_IndicatorTab` (общий виджет графика —
   с опцией `show_regime`, чекбоксом «Точки перегиба» и `explainLabel`),

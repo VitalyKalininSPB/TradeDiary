@@ -2,6 +2,7 @@
 import sys
 import os
 import logging
+import datetime
 
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -26,6 +27,70 @@ import idea_log
 
 log = logging.getLogger(__name__)
 
+
+def _parse_dt(s):
+    for fmt in ('%d/%m/%Y %H:%M', '%d/%m/%Y'):
+        try:
+            return datetime.datetime.strptime(str(s), fmt)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+class Position:
+    """Агрегированная позиция по тикеру — одна строка таблицы.
+
+    Собирается из одной или нескольких открытых сделок одного тикера:
+    количество суммируется, цена входа/текущая — средневзвешенные по объёму.
+    Для закрытых сделок позиция — из одной сделки (с сохранённым result).
+    """
+
+    def __init__(self, ticker, deals):
+        self.ticker = (ticker or '').strip()
+        self.deals = list(deals)
+        first = self.deals[0]
+        self.direction = first.direction
+        self.currency = first.currency
+        self.amount = sum((d.amount or 0.0) for d in self.deals)
+        self.stock_price = self._wavg('stock_price')
+        self.init_price = self._wavg('init_price')
+        self.take_profit = self._wavg('take_profit')
+        self.stop_loss = self._wavg('stop_loss')
+        self.trade_system = first.trade_system
+        if first.close_date:
+            self.result = first.result or ''
+            self.close_date = first.close_date
+        else:
+            self.result = ''
+            self.close_date = ''
+        self.open_date = self._earliest('open_date')
+        self.whats_next = '; '.join(
+            dict.fromkeys(d.whats_next for d in self.deals if d.whats_next))
+        self.notes = '; '.join(
+            dict.fromkeys(d.notes for d in self.deals if d.notes))
+
+    def _wavg(self, attr):
+        amount = self.amount
+        if amount <= 0:
+            return getattr(self.deals[0], attr, 0.0) or 0.0
+        total = sum((getattr(d, attr, 0.0) or 0.0) * (d.amount or 0.0)
+                    for d in self.deals)
+        return total / amount
+
+    def _earliest(self, attr):
+        best = None
+        best_dt = None
+        for d in self.deals:
+            raw = getattr(d, attr, '') or ''
+            dt = _parse_dt(raw)
+            if dt is not None and (best_dt is None or dt < best_dt):
+                best_dt = dt
+                best = raw
+        if best is not None:
+            return best
+        return getattr(self.deals[0], attr, '')
+
+
 class TableModel(QtCore.QAbstractTableModel):
 
     header_labels = ['Ticker',\
@@ -41,8 +106,7 @@ class TableModel(QtCore.QAbstractTableModel):
             'What\'s next', \
             'Notes', \
             'Chart', \
-            'MA chart', \
-            'Delete']
+            'MA chart']
 
     # Имена атрибутов Deal для колонок 0..11 (12/13/14 — кнопки).
     _COL_ATTRS = ['ticker', 'stock_price', 'amount', 'open_date', 'init_price',
@@ -59,8 +123,10 @@ class TableModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
             if col == 7:
                 return trade_system_name(deal.trade_system)
-            if col in (12, 13, 14):
+            if col in (12, 13):
                 return ''
+            if col == 8:
+                return self._result_text(deal)
             return getattr(deal, self._COL_ATTRS[col])
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             if deal.init_price == deal.stock_price:
@@ -74,6 +140,31 @@ class TableModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.ForegroundRole:
             if deal.init_price != deal.stock_price:
                 return QtGui.QBrush(QtGui.QColor(255, 255, 255))
+
+    @staticmethod
+    def _result_text(deal):
+        """P&L по открытой сделке: «+1.2% · +$27.14» (направление учитывается).
+
+        Для закрытой сделки показываем сохранённый `result` (если есть).
+        Если цен нет — пусто.
+        """
+        if getattr(deal, 'close_date', ''):
+            return getattr(deal, 'result', '') or ''
+        entry = getattr(deal, 'init_price', 0.0) or 0.0
+        cur = getattr(deal, 'stock_price', 0.0) or 0.0
+        if entry <= 0 or cur <= 0:
+            return getattr(deal, 'result', '') or ''
+        short = getattr(deal, 'direction', Direction.LONG) == Direction.SHORT
+        diff = (entry - cur) if short else (cur - entry)
+        pct = diff / entry * 100.0
+        parts = ['{:+.1f}%'.format(pct)]
+        amount = getattr(deal, 'amount', 0.0) or 0.0
+        if amount > 0:
+            sign = markets.CURRENCY_SIGN.get(getattr(deal, 'currency', ''), '')
+            amt = diff * amount
+            amt_txt = ('-' if amt < 0 else '+') + sign + '{:.2f}'.format(abs(amt))
+            parts.append(amt_txt)
+        return ' · '.join(parts)
 
     def setData(self, data):
         self._data = data
@@ -281,7 +372,7 @@ class _PriceRefreshThread(QtCore.QThread):
     Сеть выполняется в фоне, наружу отдаётся только результат.
     """
 
-    prices_ready = QtCore.Signal(dict)  # {id(deal): current_price}
+    prices_ready = QtCore.Signal(object)  # {id(deal): current_price}
 
     def __init__(self, items, parent=None):
         super().__init__(parent)
@@ -319,7 +410,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.load_ui()
         log.info("UI loaded")
         self.read_data()
-        self.model = TableModel(self.data)
+        self.model = TableModel(self._build_positions())
         self.tradeTableView.setModel(self.model)
         self.tradeTableView.clicked.connect(self.editClicked)
         self._chartButtons = []
@@ -329,8 +420,6 @@ class TradeDiary(QtWidgets.QMainWindow):
             12, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.tradeTableView.horizontalHeader().setSectionResizeMode(
             13, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self.tradeTableView.horizontalHeader().setSectionResizeMode(
-            14, QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.longButton.clicked.connect(self.longClicked)
         self.shortButton.clicked.connect(self.shortClicked)
         self.updatePricesButton.clicked.connect(self.updatePricesClicked)
@@ -357,9 +446,9 @@ class TradeDiary(QtWidgets.QMainWindow):
         self.clearDbButton.clicked.connect(self.clearDbClicked)
         self.recalcSlTpButton.clicked.connect(self.recalcSlTpClicked)
         self.dealHistoryButton.clicked.connect(self.dealHistoryClicked)
+        self.tradeTableView.setColumnWidth(8, 150)
         self.tradeTableView.setColumnWidth(12, 80)
         self.tradeTableView.setColumnWidth(13, 70)
-        self.tradeTableView.setColumnWidth(14, 70)
         self.simpleModeButton.toggled.connect(
             simple_mode_settings.set_simple_enabled)
         simple_mode_settings.simple_changed().connect(
@@ -371,6 +460,29 @@ class TradeDiary(QtWidgets.QMainWindow):
         if hasattr(self, 'portfolioContextFrame'):
             self.portfolioContextFrame.setVisible(on)
 
+    def _build_positions(self):
+        """Собрать строки таблицы: открытые сделки группируются по тикеру."""
+        positions = []
+        groups = {}
+        for deal in self.data:
+            ticker = (deal.ticker or '').strip()
+            if deal.close_date:
+                if ticker:
+                    positions.append(Position(ticker, [deal]))
+                continue
+            if not ticker:
+                continue
+            groups.setdefault(ticker, []).append(deal)
+        for ticker, deals in groups.items():
+            positions.append(Position(ticker, deals))
+        return positions
+
+    def _syncModel(self):
+        """Пересобрать агрегированные позиции и обновить таблицу."""
+        self.model.setData(self._build_positions())
+        self.model.layoutChanged.emit()
+        self._rebuildChartButtons()
+
     def _rebuildChartButtons(self):
         for w in self._chartButtons:
             w.setParent(None)
@@ -378,8 +490,7 @@ class TradeDiary(QtWidgets.QMainWindow):
         self._chartButtons = []
         if not hasattr(self, 'tradeTableView') or self.tradeTableView.model() is None:
             return
-        rows = getattr(self, 'data', [])
-        for row in range(len(rows)):
+        for row in range(self.model.rowCount(None)):
             ca_btn = QtWidgets.QPushButton('Chart')
             ca_btn.setFixedSize(74, 24)
             ca_btn.setToolTip('Свечной график (OHLC): тела и тени свечей')
@@ -395,26 +506,20 @@ class TradeDiary(QtWidgets.QMainWindow):
             self.tradeTableView.setIndexWidget(self.model.index(row, 13), ma_btn)
             self._chartButtons.append(ma_btn)
 
-            del_btn = QtWidgets.QPushButton('Delete')
-            del_btn.setFixedSize(62, 24)
-            del_btn.setToolTip('Удалить сделку')
-            del_btn.clicked.connect(lambda checked=False, r=row: self.deleteClicked(r))
-            self.tradeTableView.setIndexWidget(self.model.index(row, 14), del_btn)
-            self._chartButtons.append(del_btn)
-
     def _openNonModal(self, kind, row):
         """Open a chart dialog non-modally so several can be visible at once."""
-        if row < 0 or row >= len(self.data):
+        positions = self.model._data
+        if row < 0 or row >= len(positions):
             return
-        deal = self.data[row]
+        pos = positions[row]
         if kind == 'ma':
             from ma_chart_dialog import MAChartDialog
-            dlg = MAChartDialog(deal.ticker, deal.currency,
-                                deal.open_date, deal.close_date, self)
+            dlg = MAChartDialog(pos.ticker, pos.currency,
+                                pos.open_date, pos.close_date, self)
         else:
             from candles_dialog import CandlesDialog
-            dlg = CandlesDialog(deal.ticker, deal.currency,
-                                deal.open_date, deal.close_date, self)
+            dlg = CandlesDialog(pos.ticker, pos.currency,
+                                pos.open_date, pos.close_date, self)
         dlg.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.destroyed.connect(lambda obj=None, d=dlg: self._dialogs_set().discard(d))
         self._dialogs_set().add(dlg)
@@ -977,7 +1082,7 @@ class TradeDiary(QtWidgets.QMainWindow):
                 changed = True
         if not changed:
             return
-        self.tradeTableView.model().layoutChanged.emit()
+        self._syncModel()
         self.recalcBalance()
 
     def recalcBalance(self):
@@ -1048,7 +1153,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             deal = dlg.makeDeal()
             self.debitLong(deal)
             self.data.append(deal)
-            self.tradeTableView.model().layoutChanged.emit()
+            self._syncModel()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
             idea_log.log_idea_from_deal(deal)
@@ -1097,7 +1202,7 @@ class TradeDiary(QtWidgets.QMainWindow):
             log.info("Success!")
             deal = dlg.makeDeal()
             self.data.append(deal)
-            self.tradeTableView.model().layoutChanged.emit()
+            self._syncModel()
             self.recalcBalance()
             self.onTickerAdded(deal.ticker, deal.currency)
             idea_log.log_idea_from_deal(deal)
@@ -1142,25 +1247,46 @@ class TradeDiary(QtWidgets.QMainWindow):
                         auto_hide_ms=8000 if 'Quant alerts' in advice else 5000)
 
     def deleteClicked(self, row):
-        if row < 0 or row >= len(self.data):
+        positions = self.model._data
+        if row < 0 or row >= len(positions):
             return
-        ticker = self.data[row].ticker or 'deal'
+        pos = positions[row]
+        ticker = pos.ticker or 'deal'
         ret = QtWidgets.QMessageBox.question(
-            self.window(), 'Delete deal',
-            'Delete this deal ({} )?'.format(ticker),
+            self.window(), 'Delete position',
+            'Удалить позицию {} ({} сделок)?'.format(ticker, len(pos.deals)),
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No)
         if ret != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        self.model.removeRows(row, 1)
-        self._rebuildChartButtons()
+        for deal in list(pos.deals):
+            if deal in self.data:
+                self.data.remove(deal)
+        self._syncModel()
         self.recalcBalance()
         self.refreshCorrelation()
 
     def editClicked(self, item):
-        log.info("Edit clicked %s", item.row())
-        deal = self.data[item.row()]
+        row = item.row()
+        positions = self.model._data
+        if not (0 <= row < len(positions)):
+            return
+        log.info("Edit clicked %s", row)
+        pos = positions[row]
+        deal = pos.deals[0]
+        if len(pos.deals) > 1:
+            labels = ['{}. {:.6g} шт @ {:.4g} ({})'.format(
+                i + 1, d.amount, d.init_price, d.open_date)
+                for i, d in enumerate(pos.deals)]
+            choice, ok = QtWidgets.QInputDialog.getItem(
+                self, 'Правка {}'.format(pos.ticker),
+                'Позиция из {} сделок — выберите сделку:'.format(
+                    len(pos.deals)),
+                labels, 0, False)
+            if not ok:
+                return
+            deal = pos.deals[labels.index(choice)]
         dlg = EditDealDialog()
         dlg.setData(deal, self.balanceUsd())
         if dlg.exec():
@@ -1168,9 +1294,9 @@ class TradeDiary(QtWidgets.QMainWindow):
             if deal.close_date:
                 idea_log.close_idea_from_deal(deal)
                 self._creditClose(deal)
-                self.data.remove(deal)
-                self._rebuildChartButtons()
-            self.tradeTableView.model().layoutChanged.emit()
+                if deal in self.data:
+                    self.data.remove(deal)
+            self._syncModel()
             self.recalcBalance()
 
     def _riskPercentForCorr(self, corr):
@@ -1291,7 +1417,7 @@ class TradeDiary(QtWidgets.QMainWindow):
                 deal.take_profit = tp
             changed_tickers.append(ticker)
 
-        self.tradeTableView.model().layoutChanged.emit()
+        self._syncModel()
         self.recalcBalance()
 
         if changed_tickers:
