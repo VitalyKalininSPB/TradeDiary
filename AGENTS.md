@@ -22,7 +22,7 @@ QT_QPA_PLATFORM=offscreen python -c "...диалоги..."   # offscreen, без
 **ВАЖНО (со следующей сессии): не запускай авто-захват WebView-тест**
 (тест, который через `webView.page().toHtml()`/`runJavaScript` проверяет
 автозахват содержимого Quality Assessment из встроенного браузера в
-`qualitative_dialog._finish_assessment`/`_finalize_report`). В offscreen он
+`qualitative_dialog._finalize_report_view`). В offscreen он
 ненадёжен: веб-движок не догружает страницу и возвращает пустую/урезанную
 разметку, тест зависает или даёт ложный результат. Форматирование тезиса
 Quality Assessment в проде сохраняется через ручную кнопку «Quality result»
@@ -209,16 +209,19 @@ Analysis и остальные экраны не развиваем, не пер
   применяется ко всей карточке тикера (RecommendationDialog и
   RecommendationPanel), запоминается между запусками.
 - **Кнопка «Add to Watchlist»** в RecommendationDialog (экран анализа компании):
-  идемпотентное добавление в `watchlist.json` через `add_to_watchlist_safe`
-  (recommendation_panel.py). Если тикер уже в watchlist — кнопка disabled с
-  текстом «In Watchlist» (`watchlist_contains`). Успех → сообщение
-  «Added to Watchlist»; ошибка сохранения → понятное сообщение.
+  идемпотентное добавление в `watchlist.json` БЕЗ Quant (`watchlist.add`). Если
+  тикер уже в watchlist — кнопка disabled с текстом «In Watchlist»
+  (`watchlist_contains`). **Quant отмечается отдельной кнопкой «Mark Quant passed»**
+  (`_mark_quant_passed`): сохраняет Quant-скор (`set_quant_snapshot`) или ставит
+  ручную отметку (`set_quant_passed`), если скор недоступен; после прохождения —
+  disabled с текстом «Quant ✓ passed». Так добавление в список и прохождение Quant
+  независимы. Ошибка сохранения → понятное сообщение.
   Тесты: `tests/test_watchlist_add.py`.
 
 ## Карта модулей
 
 - `main.py` (1080+ строк): `TradeDiary(QMainWindow)` — главное окно; `TableModel`
-  (таблица сделок, 15 колонок, 12/13/14 = кнопки Chart/Candles/Delete); чтение/запись
+  (таблица сделок, 15 колонок, 12/13/14 = кнопки Chart(candles)/MA/Delete); чтение/запись
   `diary.xml`; термометры макро и корреляции; риск-модель `RISK_BY_CORR`; обработчики кнопок.
 - `macro_dialog.py`: `compute_macro_score` (весовой `_SCORERS`, `math.tanh`, `_MOMENTUM_DAYS=90`,
   `_YOY_DAYS=365`), `compute_macro_score_cached`, `_IndicatorTab` (общий виджет графика —
@@ -239,6 +242,10 @@ Analysis и остальные экраны не развиваем, не пер
 - `candles_dialog.py`: свечной график по OHLC.
 - `correlation_dialog.py`: тепловая карта (seaborn).
 - `qualitative_dialog.py`: GoatAssistant (Clippy-аналог), опционально QtWebEngine.
+  На последнем этапе вместо [Finish] — две кнопки **[Qual passed ✓]** /
+  **[Qual not passed ✗]** (`_confirm_qual`): «passed» сохраняет Qual-снапшот
+  (`_save_qual(force=True)`), «not passed» снимает его (`watchlist.clear_qual`).
+  Тесты: `tests/test_qual_flow.py`.
 - `catalyst.py` / `catalyst_dialog.py`: катализаторы по тикерам. `catalyst.py` —
   чистое SQLite-хранилище `catalyst.db` (таблица `catalyst_events`: ticker, date,
   score 0-5, direction +/−/±, description, expectation, notified) + `due_events(1)`/
@@ -285,6 +292,12 @@ Analysis и остальные экраны не развиваем, не пер
   - `watchlist_dialog.py`: колонка **Tech** (цветной статус), кнопка **Technical**,
     двойной клик по колонке; `_TechnicalTimingThread` (фоновый пересчёт, `cancel()`),
     `_open_trade_plan` (DealDialog с контекстом, Long по умолчанию), `_view_chart`.
+    Колонки **Quant ✓ / Qual ✓**: клик по лампочке 💡 снимает прохождение (Yes/No),
+    клик по пустой Quant-ячейке отмечает Quant вручную (`watchlist.set_quant_passed`),
+    `watchlist.clear_quant`/`clear_qual`. `WatchlistEntryDialog(show_quant=True)` —
+    чекбокс «Quant Assessment пройден (вручную)» в Add/Edit. Ручная отметка
+    (`entry['quant_passed']`) учитывается гейтом сделки (`watchlist.is_quant_passed`)
+    и НЕ требуется для прохождения Qual.
   - `DealDialog.py`: блок «Technical context» (только чтение из БД, без пересчёта) +
     кнопка Chart; `loadTechnicalContext(ticker, hint=False)` — при `hint=True` и мягком
     warning показывает подсказку козы (`_show_goat`). Вызывается из `tickerChanged`

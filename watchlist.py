@@ -26,7 +26,83 @@ def _entry(ticker):
         'snapshot': None,
         'quant': None,
         'qual': None,
+        'quant_passed': False,
     }
+
+
+def is_quant_passed(entry):
+    """Quant пройден: есть снапшот анализа ИЛИ стоит ручная отметка.
+
+    Ручная отметка (`quant_passed`) нужна, когда Quant-скор посчитать нельзя,
+    но пользователь сознательно подтверждает, что Quant-этап пройден.
+    Отсутствие Quant НЕ мешает пройти Qual.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if get_quant(entry) is not None:
+        return True
+    return bool(entry.get('quant_passed'))
+
+
+def set_quant_passed(ticker, passed=True, date=None):
+    """Явно отметить/снять прохождение Quant (создаёт запись при необходимости)."""
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return False
+    today = date or datetime.date.today().isoformat()
+    entries = load()
+    for e in entries:
+        if e.get('ticker') == ticker:
+            e['quant_passed'] = bool(passed)
+            if passed:
+                e['date'] = today
+            save(entries)
+            return True
+    entry = _entry(ticker)
+    entry['quant_passed'] = bool(passed)
+    if passed:
+        entry['date'] = today
+    entries.append(entry)
+    save(entries)
+    return True
+
+
+def clear_quant(ticker):
+    """Снять Quant: убрать снапшот и ручную отметку (снова не пройден)."""
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return False
+    entries = load()
+    for e in entries:
+        if e.get('ticker') == ticker:
+            e['quant'] = None
+            e['quant_passed'] = False
+            snap = e.get('snapshot')
+            if isinstance(snap, dict):
+                snap.pop('quant', None)
+                snap.pop('quant_sector', None)
+            save(entries)
+            return True
+    return False
+
+
+def clear_qual(ticker):
+    """Снять Qual: убрать снапшот (снова не пройден)."""
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return False
+    entries = load()
+    for e in entries:
+        if e.get('ticker') == ticker:
+            e['qual'] = None
+            snap = e.get('snapshot')
+            if isinstance(snap, dict):
+                snap.pop('qual', None)
+                snap.pop('quality', None)
+                snap.pop('quality_html', None)
+            save(entries)
+            return True
+    return False
 
 
 def _migrate_legacy(entry):

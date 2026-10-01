@@ -430,13 +430,13 @@ class DealDialog(QDialog):
         называет КОНКРЕТНЫЙ незавершённый анализ, а не оба сразу.
         """
         from watchlist import find as watchlist_find
-        from watchlist import get_quant, get_qual
+        from watchlist import is_quant_passed, get_qual
         ticker = (self.ticketEdit.text() or '').strip().upper()
         if not ticker:
             return True, []
         entry = watchlist_find(ticker) or {}
         missing = []
-        if get_quant(entry) is None:
+        if not is_quant_passed(entry):
             missing.append('Quant')
         if get_qual(entry) is None:
             missing.append('Qual')

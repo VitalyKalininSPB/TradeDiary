@@ -30,7 +30,8 @@ _EV_HEADERS = ['Ticker', 'Дата', 'Балл', 'Напр', 'Описание',
 class WatchlistEntryDialog(QtWidgets.QDialog):
     """Ручной workflow: статус, причина решения, заметка, дата + снапшот."""
 
-    def __init__(self, ticker='', snapshot=None, entry=None, parent=None):
+    def __init__(self, ticker='', snapshot=None, entry=None, parent=None,
+                 show_quant=False):
         super().__init__(parent)
         self.setWindowTitle('Watchlist entry')
         self.setMinimumWidth(460)
@@ -49,10 +50,18 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
         self.snapLabel.setWordWrap(True)
         self.snapLabel.setStyleSheet('color: {};'.format(_TXT))
 
+        self.quantPassedChk = QtWidgets.QCheckBox(
+            'Quant Assessment пройден (вручную)')
+        self.quantPassedChk.setToolTip(
+            'Отметить Quant пройденным, даже если Quant-скор не считался.\n'
+            'Не мешает прохождению Qual Assessment.')
+
         form.addRow('Ticker:', self.tickerEdit)
         form.addRow('Status:', self.statusCombo)
         form.addRow('Reason:', self.reasonEdit)
         form.addRow('Note:', self.noteEdit)
+        if show_quant:
+            form.addRow('Quant:', self.quantPassedChk)
         form.addRow('Snapshot:', self.snapLabel)
 
         if entry is not None:
@@ -62,6 +71,12 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
             self.reasonEdit.setText(entry.get('reason') or '')
             self.noteEdit.setPlainText(entry.get('note') or '')
             self.snapLabel.setText(self._snapshot_text(entry))
+            self.quantPassedChk.setChecked(watchlist.is_quant_passed(entry))
+            if watchlist.get_quant(entry) is not None:
+                self.quantPassedChk.setChecked(True)
+                self.quantPassedChk.setEnabled(False)
+                self.quantPassedChk.setToolTip(
+                    'Quant пройден по анализу — ручная отметка не требуется.')
         elif snapshot is not None:
             self.snapLabel.setText(self._snapshot_text(
                 {'ticker': ticker or '', 'snapshot': snapshot,
@@ -112,6 +127,7 @@ class WatchlistEntryDialog(QtWidgets.QDialog):
             'status': self.statusCombo.currentText(),
             'reason': self.reasonEdit.text().strip(),
             'note': self.noteEdit.toPlainText().strip(),
+            'quant_passed': self.quantPassedChk.isChecked(),
         }
 
 
@@ -172,6 +188,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         self.table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.cellDoubleClicked.connect(self._on_table_double)
+        self.table.cellClicked.connect(self._on_table_click)
         wlay.addWidget(self.table, 1)
 
         row = QtWidgets.QHBoxLayout()
@@ -270,7 +287,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         for r, e in enumerate(entries):
             qn = watchlist.get_quant(e)
             ql = watchlist.get_qual(e)
-            quant_ok = qn is not None
+            quant_ok = watchlist.is_quant_passed(e)
             qual_ok = ql is not None
             summary = catalyst.summary_for(e.get('ticker', ''))
             cat_txt = ''
@@ -308,15 +325,20 @@ class WatchlistDialog(QtWidgets.QDialog):
                     if v == '💡':
                         item.setForeground(QColor('#f0c14b'))
                         item.setToolTip(
-                            'Quant Assessment пройден' if c == 5
-                            else 'Qual Assessment пройден\nДвойной клик — '
-                                 'просмотр Qual-отчёта')
+                            ('Quant Assessment пройден'
+                             + ('' if qn is not None else ' (отмечено вручную)')
+                             + '\nКлик — снять')
+                            if c == 5
+                            else 'Qual Assessment пройден\nКлик — снять; '
+                                 'двойной клик по колонке Qual — отчёт')
                     else:
                         item.setForeground(QColor(_TXT))
                         item.setToolTip(
-                            'Quant Assessment не пройден' if c == 5
-                            else 'Qual Assessment не пройден\nДвойной клик — '
-                                 'просмотр Qual-отчёта')
+                            ('Quant Assessment не пройден\n'
+                             'Клик — отметить пройденным вручную')
+                            if c == 5
+                            else 'Qual Assessment не пройден\n'
+                                 'Двойной клик по колонке Qual — отчёт')
                 elif c == 10:
                     item.setToolTip(v)
                 elif c in (4, 6):
@@ -540,10 +562,47 @@ class WatchlistDialog(QtWidgets.QDialog):
             self._catalyst()
         elif col == 9:
             self._technical()
-        elif col in (6, 7):
+        elif col == 6:
             self._view_quality()
         else:
             self._edit()
+
+    def _on_table_click(self, row, col):
+        """Клик по лампочке Quant ✓ / Qual ✓ — снять (или отметить Quant)."""
+        if col not in (5, 7) or not (0 <= row < len(self._entries)):
+            return
+        e = self._entries[row]
+        ticker = e.get('ticker', '')
+        if col == 5:
+            if watchlist.is_quant_passed(e):
+                if self._confirm_clear('Quant Assessment', ticker):
+                    watchlist.clear_quant(ticker)
+                    self._refresh()
+            else:
+                ret = QtWidgets.QMessageBox.question(
+                    self, 'Quant',
+                    'Отметить Quant Assessment для {} пройденным вручную?'
+                    .format(ticker),
+                    QtWidgets.QMessageBox.StandardButton.Yes
+                    | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No)
+                if ret == QtWidgets.QMessageBox.StandardButton.Yes:
+                    watchlist.set_quant_passed(ticker, True)
+                    self._refresh()
+        elif watchlist.get_qual(e) is not None:
+            if self._confirm_clear('Qual Assessment', ticker):
+                watchlist.clear_qual(ticker)
+                self._refresh()
+
+    def _confirm_clear(self, what, ticker):
+        ret = QtWidgets.QMessageBox.question(
+            self, 'Снять ' + what,
+            'Снять {} для {}?\nОтметка прохождения будет убрана.'.format(
+                what, ticker),
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No)
+        return ret == QtWidgets.QMessageBox.StandardButton.Yes
 
     def _view_quality(self):
         """Показать полный Qual-отчёт: таблица этапов, итоги, Quality Assessment."""
@@ -644,7 +703,7 @@ class WatchlistDialog(QtWidgets.QDialog):
         dlg.exec()
 
     def _add(self):
-        dlg = WatchlistEntryDialog(snapshot={}, parent=self)
+        dlg = WatchlistEntryDialog(snapshot={}, parent=self, show_quant=True)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
@@ -652,6 +711,8 @@ class WatchlistDialog(QtWidgets.QDialog):
             return
         res = watchlist.add(v['ticker'], v['status'], v['note'], v['reason'],
                             snapshot={'date': None})
+        if v.get('quant_passed'):
+            watchlist.set_quant_passed(v['ticker'], True)
         self._refresh()
         QtWidgets.QMessageBox.information(
             self, 'Watchlist',
@@ -664,11 +725,13 @@ class WatchlistDialog(QtWidgets.QDialog):
         if entry is None:
             return
         dlg = WatchlistEntryDialog(ticker=entry.get('ticker'),
-                                   snapshot=None, entry=entry, parent=self)
+                                   snapshot=None, entry=entry, parent=self,
+                                   show_quant=True)
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
         watchlist.update(v['ticker'], v['status'], v['note'], v['reason'])
+        watchlist.set_quant_passed(v['ticker'], v.get('quant_passed', False))
         self._refresh()
 
     def _remove(self):

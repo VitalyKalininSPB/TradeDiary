@@ -434,6 +434,8 @@ class QualitativeAssessmentDialog(QDialog):
         self.beginButton.clicked.connect(self._on_begin_button)
         self.nextButton.clicked.connect(self._next_stage)
         self.nextButton.setEnabled(False)
+        self.qualPassButton.clicked.connect(lambda: self._confirm_qual(True))
+        self.qualFailButton.clicked.connect(lambda: self._confirm_qual(False))
         self.notesButton.clicked.connect(self._open_notes)
         self.notesButton.setEnabled(False)
         self.qualityButton.clicked.connect(self._open_quality)
@@ -483,6 +485,14 @@ class QualitativeAssessmentDialog(QDialog):
         row.addWidget(rating_lbl)
         row.addWidget(self.starRating)
         row.addStretch(1)
+        self.qualPassButton = QPushButton('Qual passed ✓')
+        self.qualPassButton.setMinimumWidth(120)
+        self.qualPassButton.setVisible(False)
+        self.qualFailButton = QPushButton('Qual not passed ✗')
+        self.qualFailButton.setMinimumWidth(140)
+        self.qualFailButton.setVisible(False)
+        row.addWidget(self.qualPassButton)
+        row.addWidget(self.qualFailButton)
         self.nextButton = QPushButton('Next')
         self.nextButton.setMinimumWidth(110)
         row.addWidget(self.nextButton)
@@ -718,24 +728,22 @@ class QualitativeAssessmentDialog(QDialog):
             self.accept()
             return
         self._current_stage += 1
-        if self._current_stage >= len(STAGES):
-            self.nextButton.setText('Finish')
-            self.nextButton.setEnabled(True)
-            self.scale.mark_all_done()
-            self._update_watchlist_button()
-            self._finish_assessment()
-            return
         self.scale.set_stage(self._current_stage)
         self.starRating.setRating(0)
         query = self._plans_list[self._current_stage]
         if self._current_stage in STAGE_PROMPTS:
             _, prompt = STAGE_PROMPTS[self._current_stage]
             query = prompt.replace('[ТИКЕР]', self._ticker or 'N/A')
-        self.nextButton.setText(
-            'Finish' if self._current_stage == len(STAGES) - 1 else 'Next')
         if QWebEngineView is not None:
             url = 'https://www.google.com/search?q=' + quote_plus(query) + '&udm=50'
             self.webView.load(url)
+        if self._current_stage == len(STAGES) - 1:
+            self.scale.mark_all_done()
+            self.nextButton.setVisible(False)
+            self.qualPassButton.setVisible(True)
+            self.qualFailButton.setVisible(True)
+        else:
+            self.nextButton.setText('Next')
 
     def _update_watchlist_button(self):
         """Кнопка сохранения результата (тикер уже есть — обновляем запись)."""
@@ -746,29 +754,41 @@ class QualitativeAssessmentDialog(QDialog):
             self.beginButton.setText('Add to Watchlist')
         self.beginButton.setEnabled(True)
 
-    def _finish_assessment(self):
-        """Собрать отчёт и показать итог.
-
-        Тезис Quality Assessment сохраняется через кнопку «Quality result»
-        (rich text, сохраняет форматирование). Авто-захват из WebView НЕ
-        используется — он хватал страницу Google-поиска, а не ответ.
-        Результат сохраняется в Watchlist ТОЛЬКО при финише.
-        """
-        self._finalize_report()
-
-    def _finalize_report(self):
-        self._auto_save_to_watchlist()
+    def _finalize_report_view(self):
+        """Показать итоговый отчёт БЕЗ сохранения: пользователь подтверждает
+        результат кнопками «Qual passed ✓» / «Qual not passed ✗»."""
         if QWebEngineView is not None and isinstance(self.webView, QWebEngineView):
             self.webView.stop()
             self.webView.setHtml(self._stats_html())
         self._show_goat()
 
-    def _auto_save_to_watchlist(self):
-        """Сохранить Qual-результат в Watchlist ТОЛЬКО при финише.
+    def _confirm_qual(self, passed):
+        """Явное подтверждение результата Qual: прошёл / не прошёл."""
+        self.qualPassButton.setEnabled(False)
+        self.qualFailButton.setEnabled(False)
+        self._finalize_report_view()
+        if passed:
+            self._save_qual(force=True)
+        else:
+            try:
+                from watchlist import clear_qual
+                clear_qual(self._ticker)
+            except (OSError, ValueError) as exc:
+                print('Watchlist clear failed: {}'.format(exc))
+        self._update_watchlist_button()
+        QtWidgets.QMessageBox.information(
+            self, 'Qual Assessment',
+            '{}: Qual {}.'.format(
+                self._ticker or '',
+                'отмечен пройденным' if passed else 'отмечен НЕ пройденным'))
+
+    def _save_qual(self, force=False):
+        """Сохранить Qual-результат в Watchlist.
 
         Пишет отдельный Qual-снапшот (quant/катализаторы не затрагиваются).
-        Если ничего не оценено (все звёзды 0 и нет тезиса) — запись не трогаем,
-        чтобы пустой прогон не затирал уже сохранённое.
+        При force=True сохраняет даже пустой прогон (пользователь явно
+        подтвердил «Qual passed»). Без force пустой прогон не затирает
+        уже сохранённое.
         """
         if not self._ticker:
             return
@@ -776,7 +796,7 @@ class QualitativeAssessmentDialog(QDialog):
         from watchlist import set_qual_snapshot
         ratings = [r for r in self._ratings if r > 0]
         qual = (sum(ratings) / len(ratings)) if ratings else 0.0
-        if qual <= 0 and not self._quality and not self._quality_html:
+        if not force and qual <= 0 and not self._quality and not self._quality_html:
             return
         try:
             set_qual_snapshot(

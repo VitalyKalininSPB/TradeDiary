@@ -719,6 +719,19 @@ class RecommendationDialog(QtWidgets.QDialog):
         self._watchlistButton.setCursor(Qt.CursorShape.PointingHandCursor)
         self._watchlistButton.clicked.connect(self._add_to_watchlist)
         row.addWidget(self._watchlistButton)
+        self._quantButton = QtWidgets.QPushButton()
+        self._quantButton.setStyleSheet(
+            'QPushButton { background: #2a3d2a; color: ' + _TXT
+            + '; border: 1px solid ' + _GRID + '; border-radius: 4px; '
+            'padding: 3px 10px; }'
+            'QPushButton:hover { background: #354a35; }'
+            'QPushButton:disabled { color: ' + _MUTED + '; }')
+        self._quantButton.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._quantButton.setToolTip(
+            'Отметить Quant Assessment пройденным (отдельно от добавления в '
+            'Watchlist).')
+        self._quantButton.clicked.connect(self._mark_quant_passed)
+        row.addWidget(self._quantButton)
         self._refresh_watchlist_button()
         row.addStretch(1)
         close = QtWidgets.QPushButton('Close')
@@ -756,55 +769,74 @@ class RecommendationDialog(QtWidgets.QDialog):
         self._apply_visible()
 
     def _refresh_watchlist_button(self):
+        from watchlist import find as watchlist_find
+        from watchlist import is_quant_passed
         present = watchlist_contains(self._ticker)
         self._watchlistButton.setText(
             'In Watchlist' if present else 'Add to Watchlist')
         self._watchlistButton.setEnabled(not present)
+        entry = watchlist_find(self._ticker) or {}
+        q_passed = is_quant_passed(entry)
+        self._quantButton.setText(
+            'Quant ✓ passed' if q_passed else 'Mark Quant passed')
+        self._quantButton.setEnabled(not q_passed)
 
     def _add_to_watchlist(self):
-        """Сохранить тикер в Watchlist с отдельным Quant-снапшотом.
+        """Добавить тикер в Watchlist БЕЗ Quant.
 
-        Qual-снапшот не затрагивается. Для новых записей — добавить,
-        для существующих — обновить только Quant.
+        Quant Assessment отмечается отдельной кнопкой «Mark Quant passed» —
+        добавление в список и прохождение Quant теперь независимы.
+        """
+        ticker = self._ticker
+        if not ticker:
+            return
+        from watchlist import add as watchlist_add
+        try:
+            res = watchlist_add(ticker)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self, 'Watchlist',
+                'Не удалось сохранить watchlist: {}'.format(exc))
+            return
+        QtWidgets.QMessageBox.information(
+            self, 'Watchlist',
+            '{} {} в watchlist. Отметьте Quant отдельной кнопкой '
+            '«Mark Quant passed».'.format(
+                ticker, 'добавлен' if res == 'added' else 'обновлён'))
+        self._refresh_watchlist_button()
+
+    def _mark_quant_passed(self):
+        """Явно отметить Quant Assessment пройденным.
+
+        Сохраняет Quant-скор, если он посчитан; иначе ставит ручную отметку.
         """
         ticker = self._ticker
         if not ticker:
             return
         import datetime
-        from watchlist import set_quant_snapshot
+        from watchlist import set_quant_snapshot, set_quant_passed
         e = self._e or {}
         quant = e.get('score_rounded')
         if quant is None:
             cs = e.get('company_score')
             quant = round(cs, 2) if isinstance(cs, (int, float)) else None
-        if quant is None:
-            QtWidgets.QMessageBox.information(
-                self, 'Watchlist',
-                'Quant-скор для {} недоступен — тикер добавлен без Quant.'.format(
-                    ticker))
-            res = self._add_bare_watchlist_entry()
-        else:
-            try:
-                res = set_quant_snapshot(
-                    ticker, quant,
-                    sector=e.get('sector'),
+        try:
+            if quant is None:
+                set_quant_passed(ticker, True)
+                msg = ('{}: Quant отмечен пройденным вручную '
+                       '(скор недоступен).'.format(ticker))
+            else:
+                set_quant_snapshot(
+                    ticker, quant, sector=e.get('sector'),
                     date=datetime.date.today().isoformat())
-            except (OSError, ValueError) as exc:
-                QtWidgets.QMessageBox.critical(
-                    self, 'Watchlist',
-                    'Не удалось сохранить watchlist: {}'.format(exc))
-                return
-            QtWidgets.QMessageBox.information(
+                msg = '{}: Quant пройден (скор {:+.2f}).'.format(ticker, quant)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(
                 self, 'Watchlist',
-                '{} {} в watchlist (Quant {:.2f}).'.format(
-                    ticker, 'добавлен' if res == 'added' else 'обновлён',
-                    quant))
+                'Не удалось сохранить watchlist: {}'.format(exc))
+            return
+        QtWidgets.QMessageBox.information(self, 'Quant Assessment', msg)
         self._refresh_watchlist_button()
-
-    def _add_bare_watchlist_entry(self):
-        """Добавить запись без Quant-скора (snapshot не трогается)."""
-        from watchlist import add as watchlist_add
-        return watchlist_add(self._ticker)
 
     def _on_mode_changed(self, on):
         if on == self._simple:
